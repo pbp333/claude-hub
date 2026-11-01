@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { DirEntry, GitStatus } from '../../../shared/types'
-import { useSession, useUi } from '../store'
+import { useProject } from '../store'
 import { openFile } from '../workspace'
 
 const norm = (p: string) => p.replace(/\\/g, '/')
 
 export function FileTree() {
-  const activeSessionId = useUi((s) => s.activeSessionId)
-  const session = useSession(activeSessionId)
-  const root = session?.cwd
+  const root = useProject()?.path
   const [status, setStatus] = useState<GitStatus>({})
   const [version, setVersion] = useState(0)
 
@@ -24,6 +22,7 @@ export function FileTree() {
     let timer: ReturnType<typeof setTimeout> | undefined
     const stop = window.hub.onFsChanged((paths) => {
       if (!paths.some((p) => p.startsWith(root))) return
+      // Git markers follow commits and checkouts (.git/index, .git/HEAD) too.
       clearTimeout(timer)
       timer = setTimeout(refresh, 300)
     })
@@ -33,7 +32,7 @@ export function FileTree() {
     }
   }, [root, refresh])
 
-  if (!root) return <aside className="file-tree"><div className="empty">Open a session to see its files.</div></aside>
+  if (!root) return <aside className="file-tree" />
   return (
     <aside className="file-tree">
       <div className="file-tree-header" title={root}>

@@ -11,7 +11,11 @@ const api: HubApi = {
   getState: () => ipcRenderer.invoke('get-state'),
   onState: (cb) => listen('state', cb),
   onCommand: (cb) => listen('command', cb),
-  pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  windowInfo: () => ipcRenderer.invoke('window-info'),
+  onWindowInfo: (cb) => listen('window-info', cb),
+  openFolder: () => ipcRenderer.send('open-folder'),
+  openRecent: (folder) => ipcRenderer.send('open-recent', folder),
+  newWindow: () => ipcRenderer.send('new-window'),
   createSession: (opts) => ipcRenderer.invoke('create-session', opts),
   restartSession: (id) => ipcRenderer.send('restart-session', id),
   closeSession: (id) => ipcRenderer.send('close-session', id),
@@ -34,8 +38,8 @@ const api: HubApi = {
   resolveLinks: (cwd, candidates) => ipcRenderer.invoke('resolve-links', cwd, candidates),
   onFsChanged: (cb) => listen('fs-changed', cb),
   configPath: (file) => ipcRenderer.invoke('config-path', file),
-  loadLayout: () => ipcRenderer.invoke('load-layout'),
-  saveLayout: (layout) => ipcRenderer.send('save-layout', layout),
+  loadLayout: (projectId) => ipcRenderer.invoke('load-layout', projectId),
+  saveLayout: (projectId, layout) => ipcRenderer.send('save-layout', projectId, layout),
   openExternal: (url) => ipcRenderer.send('open-external', url)
 }
 

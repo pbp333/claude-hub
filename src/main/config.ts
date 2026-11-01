@@ -24,9 +24,11 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalFont: process.platform === 'win32' ? 'Cascadia Mono, Consolas, monospace' : 'Menlo, monospace',
   terminalFontSize: 13,
   keybindings: {
+    newWindow: 'CmdOrCtrl+Shift+N',
+    openFolder: 'CmdOrCtrl+O',
     newSession: 'CmdOrCtrl+T',
     nextNeedsYou: 'CmdOrCtrl+J',
-    nextStep: 'CmdOrCtrl+Shift+N',
+    nextStep: 'CmdOrCtrl+Alt+N',
     quickOpen: 'CmdOrCtrl+P',
     commandPalette: 'CmdOrCtrl+Shift+P',
     toggleFileTree: 'CmdOrCtrl+B',
@@ -120,10 +122,13 @@ export function loadConfig(store: JsonStore): LoadedConfig {
   const rawSettings = load<Partial<Settings>>('settings.json', DEFAULT_SETTINGS, (v) =>
     isObject(v) ? [] : ['must be a JSON object']
   )
+  const keybindings = { ...(rawSettings.keybindings ?? {}) }
+  // Next step used to default to ⌘⇧N, which is now New Window.
+  if (keybindings.nextStep === 'CmdOrCtrl+Shift+N' && !keybindings.newWindow) delete keybindings.nextStep
   const settings: Settings = {
     ...DEFAULT_SETTINGS,
     ...rawSettings,
-    keybindings: { ...DEFAULT_SETTINGS.keybindings, ...(rawSettings.keybindings ?? {}) }
+    keybindings: { ...DEFAULT_SETTINGS.keybindings, ...keybindings }
   }
   const tags = load('tags.json', DEFAULT_TAGS, validateTags)
   const rules = load('rules.json', DEFAULT_RULES, validateRules)

@@ -1,6 +1,6 @@
-import { watch, type FSWatcher } from 'chokidar'
+import { watch, type FSWatcher } from 'node:fs'
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { DirEntry } from '../shared/types'
 
 const HIDDEN = new Set(['.git', 'node_modules', '.DS_Store'])
@@ -53,7 +53,14 @@ export function isInside(root: string, path: string): boolean {
   return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
 }
 
-/** Watches the folders of open sessions and reports changed paths (debounced, batched). */
+const IGNORED_SEGMENT = /(^|[\\/])(node_modules|build|dist|out|target|\.gradle|Pods|\.expo|\.next|\.venv|DerivedData|\.cache)([\\/]|$)/
+
+/**
+ * Watches workspace folders and reports changed paths (debounced, batched). Uses the OS's
+ * recursive watcher (FSEvents on macOS, ReadDirectoryChangesW on Windows), so a large folder
+ * with many repos costs one handle. Inside .git only index and HEAD changes are reported,
+ * which is enough to refresh git markers after a commit or checkout.
+ */
 export class FolderWatcher {
   private watchers = new Map<string, FSWatcher>()
   private pending = new Set<string>()
@@ -65,20 +72,26 @@ export class FolderWatcher {
     const wanted = new Set(folders)
     for (const [dir, w] of this.watchers) {
       if (!wanted.has(dir)) {
-        void w.close()
+        w.close()
         this.watchers.delete(dir)
       }
     }
     for (const dir of wanted) {
       if (this.watchers.has(dir)) continue
-      const w = watch(dir, {
-        ignoreInitial: true,
-        ignored: (p: string) => p.split(sep).some((part) => part === 'node_modules' || part === '.git'),
-        awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 }
-      })
-      w.on('all', (_event, path) => this.queue(path))
-      w.on('error', () => undefined)
-      this.watchers.set(dir, w)
+      try {
+        const w = watch(dir, { recursive: true }, (_event, file) => {
+          if (!file) return
+          const rel = String(file)
+          if (IGNORED_SEGMENT.test(rel)) return
+          const gitIndex = rel.match(/(^|[\\/])\.git[\\/](.*)$/)
+          if (gitIndex && !/^(index|HEAD)$/.test(gitIndex[2])) return
+          this.queue(join(dir, rel))
+        })
+        w.on('error', () => undefined)
+        this.watchers.set(dir, w)
+      } catch {
+        // folder gone or not watchable
+      }
     }
   }
 
@@ -93,7 +106,7 @@ export class FolderWatcher {
   }
 
   close(): void {
-    for (const w of this.watchers.values()) void w.close()
+    for (const w of this.watchers.values()) w.close()
     this.watchers.clear()
   }
 }

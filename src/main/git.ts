@@ -1,3 +1,5 @@
+import { existsSync, type Dirent } from 'node:fs'
+import { readdir } from 'node:fs/promises'
 import type { GitStatus, PrCondition, PrInfo } from '../shared/types'
 import { run } from './env'
 
@@ -11,13 +13,60 @@ export async function repoRoot(cwd: string): Promise<string | undefined> {
   return r.ok ? r.stdout.trim() || undefined : undefined
 }
 
-/** Changed files keyed by absolute path (forward slashes on every OS), plus every parent folder marked 'M' so the tree shows where changes are. */
-export async function gitStatus(cwd: string): Promise<GitStatus> {
-  const root = await repoRoot(cwd)
-  if (!root) return {}
+/** Folders that never hold repos worth finding and are slow to scan. */
+export const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'build', 'dist', 'out', 'target', '.gradle', 'Pods', '.expo', '.next', '.venv', 'venv',
+  '__pycache__', '.idea', '.vscode', 'DerivedData', '.cache', 'coverage'
+])
+
+export const toPosix = (p: string) => p.replace(/\\/g, '/')
+
+const repoCache = new Map<string, { repos: string[]; at: number }>()
+
+/**
+ * Git repos in a workspace: the workspace itself if it is one, otherwise repos up to two
+ * levels down (~/apps/recipe-app, ~/apps/clients/acme). Cached briefly; paths use forward slashes.
+ */
+export async function findRepos(workspace: string, maxAgeMs = 10000): Promise<string[]> {
+  const root = toPosix(workspace).replace(/\/$/, '')
+  const cached = repoCache.get(root)
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.repos
+  const repos: string[] = []
+  const isRepo = (dir: string) => existsSync(`${dir}/.git`)
+  if (isRepo(root)) repos.push(root)
+  else {
+    const scan = async (dir: string, depth: number) => {
+      let entries: Dirent[] = []
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const e of entries) {
+        if (!e.isDirectory() || SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue
+        const child = `${dir}/${e.name}`
+        if (isRepo(child)) repos.push(child)
+        else if (depth < 2) await scan(child, depth + 1)
+      }
+    }
+    await scan(root, 1)
+  }
+  repos.sort()
+  repoCache.set(root, { repos, at: Date.now() })
+  return repos
+}
+
+/** The repo (from `repos`) that contains `path`, picking the deepest match. */
+export function repoFor(repos: string[], path: string): string | undefined {
+  const p = toPosix(path)
+  let best: string | undefined
+  for (const r of repos) if ((p === r || p.startsWith(r + '/')) && (!best || r.length > best.length)) best = r
+  return best
+}
+
+async function repoStatus(root: string, status: GitStatus): Promise<void> {
   const r = await run('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], root, 10000)
-  if (!r.ok) return {}
-  const status: GitStatus = {}
+  if (!r.ok) return
   const parts = r.stdout.split('\0')
   for (let i = 0; i < parts.length; i++) {
     const entry = parts[i]
@@ -25,11 +74,21 @@ export async function gitStatus(cwd: string): Promise<GitStatus> {
     const code = entry.slice(0, 2)
     const rel = entry.slice(3)
     if (code[0] === 'R') i++ // rename: the next part is the old path
-    const mark: GitStatus[string] =
+    status[`${root}/${rel}`] =
       code === '??' ? '?' : code.includes('A') ? 'A' : code.includes('D') ? 'D' : code.includes('R') ? 'R' : code.includes('U') ? 'U' : 'M'
-    const abs = `${root}/${rel}`
-    status[abs] = mark
-    let dir = abs.slice(0, abs.lastIndexOf('/'))
+  }
+}
+
+/**
+ * Changed files in every repo of the workspace, keyed by absolute path with forward slashes,
+ * plus each parent folder up to the workspace marked 'M' so the tree shows where changes are.
+ */
+export async function gitStatus(workspace: string): Promise<GitStatus> {
+  const root = toPosix(workspace).replace(/\/$/, '')
+  const status: GitStatus = {}
+  await Promise.all((await findRepos(root)).map((repo) => repoStatus(repo, status)))
+  for (const file of Object.keys(status)) {
+    let dir = file.slice(0, file.lastIndexOf('/'))
     while (dir.length > root.length && !status[dir]) {
       status[dir] = 'M'
       dir = dir.slice(0, dir.lastIndexOf('/'))
@@ -48,11 +107,42 @@ export async function headContent(path: string): Promise<string> {
   return r.ok ? r.stdout : ''
 }
 
-/** Tracked and untracked (not ignored) files, for quick open. */
-export async function listFiles(cwd: string): Promise<string[] | undefined> {
-  const r = await run('git', ['ls-files', '--cached', '--others', '--exclude-standard'], cwd, 10000)
-  if (!r.ok) return undefined
-  return r.stdout.split('\n').filter(Boolean)
+/**
+ * Files for quick open, relative to the workspace with forward slashes: each repo's tracked
+ * and untracked (not ignored) files, plus files outside any repo (skipping build folders).
+ */
+export async function listFiles(workspace: string, limit = 50000): Promise<string[]> {
+  const root = toPosix(workspace).replace(/\/$/, '')
+  const repos = await findRepos(root)
+  const out: string[] = []
+  await Promise.all(
+    repos.map(async (repo) => {
+      const r = await run('git', ['ls-files', '--cached', '--others', '--exclude-standard'], repo, 15000)
+      if (!r.ok) return
+      const prefix = repo === root ? '' : repo.slice(root.length + 1) + '/'
+      for (const f of r.stdout.split('\n')) if (f) out.push(prefix + f)
+    })
+  )
+  if (!repos.includes(root)) {
+    const repoSet = new Set(repos)
+    const walk = async (dir: string, depth: number) => {
+      if (out.length >= limit || depth > 4) return
+      let entries: Dirent[] = []
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const e of entries) {
+        const child = `${dir}/${e.name}`
+        if (e.isDirectory()) {
+          if (!SKIP_DIRS.has(e.name) && !repoSet.has(child)) await walk(child, depth + 1)
+        } else if (e.name !== '.DS_Store') out.push(child.slice(root.length + 1))
+      }
+    }
+    await walk(root, 1)
+  }
+  return out.slice(0, limit).sort()
 }
 
 interface GhPr {

@@ -1,10 +1,15 @@
-import type { DirEntry, GitStatus, HubState, NewSessionOptions, UiCommand } from '../shared/types'
+import type { DirEntry, GitStatus, HubState, NewSessionOptions, UiCommand, WindowInfo } from '../shared/types'
 
 export interface HubApi {
   getState(): Promise<HubState>
   onState(cb: (state: HubState) => void): () => void
   onCommand(cb: (cmd: UiCommand) => void): () => void
-  pickFolder(): Promise<string | undefined>
+  windowInfo(): Promise<WindowInfo>
+  onWindowInfo(cb: (info: WindowInfo) => void): () => void
+  /** Folder picker; the chosen folder opens in this window (or focuses the window that has it). */
+  openFolder(): void
+  openRecent(folder: string): void
+  newWindow(): void
   createSession(opts: NewSessionOptions): Promise<string>
   restartSession(id: string): void
   closeSession(id: string): void
@@ -22,13 +27,13 @@ export interface HubApi {
   readFile(path: string): Promise<string>
   writeFile(path: string, content: string): Promise<void>
   headContent(path: string): Promise<string>
-  gitStatus(cwd: string): Promise<GitStatus>
-  listFiles(cwd: string): Promise<string[] | undefined>
+  gitStatus(workspace: string): Promise<GitStatus>
+  listFiles(workspace: string): Promise<string[]>
   resolveLinks(cwd: string, candidates: string[]): Promise<{ text: string; path: string }[]>
   onFsChanged(cb: (paths: string[]) => void): () => void
   configPath(file: string): Promise<string | undefined>
-  loadLayout(): Promise<unknown>
-  saveLayout(layout: unknown): void
+  loadLayout(projectId: string): Promise<unknown>
+  saveLayout(projectId: string, layout: unknown): void
   openExternal(url: string): void
 }
 

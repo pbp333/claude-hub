@@ -619,3 +619,89 @@ kbd {
 .palette-item.selected {
   background: var(--bg-active);
 }
+
+/* ---- welcome ---- */
+
+.welcome {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.welcome-box {
+  width: min(520px, 100%);
+}
+
+.welcome-box h1 {
+  font-size: 22px;
+  margin: 0 0 8px;
+}
+
+.welcome-box h2 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 24px 0 6px;
+}
+
+.welcome-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.welcome-actions button {
+  padding: 6px 14px;
+}
+
+.recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+button.link {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  text-align: left;
+  color: var(--accent);
+}
+
+button.link .muted {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.small {
+  font-size: 11px;
+  margin-top: 24px;
+}
+
+.session-repos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.session-overlap {
+  font-size: 11px;
+  color: var(--done);
+  margin-top: 3px;
+}
+
+.form-note {
+  margin: 0;
+  font-size: 12px;
+}

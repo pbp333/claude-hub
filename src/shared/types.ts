@@ -11,6 +11,7 @@ export type AttentionState =
 
 export type SessionKind = 'claude' | 'shell'
 
+/** A workspace: the folder a window has open. Sessions start in it; it may hold several git repos. */
 export interface Project {
   id: string
   name: string
@@ -81,13 +82,23 @@ export interface PrInfo {
   checkedAt: string
 }
 
+/** A git repo a session has worked in, found from the files its tools touched. */
+export interface SessionRepo {
+  /** Absolute path of the repo root. */
+  path: string
+  name: string
+  branch?: string
+  pr?: PrInfo
+}
+
 export interface Session {
   id: string
+  /** The workspace this session belongs to. */
   projectId: string
   name: string
   kind: SessionKind
   cwd: string
-  branch?: string
+  repos: SessionRepo[]
   claudeSessionId?: string
   attentionState: AttentionState
   /** Set when the state changed while the session wasn't focused; cleared on focus. */
@@ -96,9 +107,8 @@ export interface Session {
   hookSeen: boolean
   running: boolean
   tagIds: string[]
-  /** Tag ids set by GitHub rules. */
+  /** Tag ids set by GitHub rules, across the session's repos. */
   autoTags: string[]
-  pr?: PrInfo
   jobTypeId?: string
   jobTypeName?: string
   /** Copied from the job type at start, so editing jobTypes.json never breaks a running session. */
@@ -111,6 +121,8 @@ export interface Session {
 }
 
 export interface Keybindings {
+  newWindow: string
+  openFolder: string
   newSession: string
   nextNeedsYou: string
   nextStep: string
@@ -154,7 +166,7 @@ export interface HubState {
 }
 
 export interface NewSessionOptions {
-  cwd: string
+  projectId: string
   name?: string
   kind: SessionKind
   jobTypeId?: string
@@ -167,6 +179,11 @@ export interface DirEntry {
 }
 
 export type GitStatus = Record<string, 'M' | 'A' | 'D' | 'R' | 'U' | '?'>
+
+/** What a window shows; undefined projectId = the welcome screen. */
+export interface WindowInfo {
+  projectId?: string
+}
 
 /** Commands sent from the app menu (keyboard shortcuts) to the UI. */
 export type UiCommand =

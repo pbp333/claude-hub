@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionKind } from '../../../shared/types'
-import { getSession, useSession, useUi } from '../store'
+import { getSession, useProject, useSession, useUi } from '../store'
 import { closeActivePanel, openFile, openSession } from '../workspace'
 
 function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
@@ -30,21 +30,16 @@ export function Dialogs() {
 
 function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const hub = useUi((s) => s.hub)
-  const [cwd, setCwd] = useState(hub?.recentFolders[0] ?? '')
+  const project = useProject()
   const [name, setName] = useState('')
   const [kind, setKind] = useState<SessionKind>('claude')
   const [jobTypeId, setJobTypeId] = useState(() => localStorage.getItem('lastJobType') ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
-  async function pick() {
-    const folder = await window.hub.pickFolder()
-    if (folder) setCwd(folder)
-  }
-
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    if (!cwd || busy) return
+    if (!project || busy) return
     setBusy(true)
     try {
       localStorage.setItem('lastJobType', jobTypeId)
@@ -53,7 +48,7 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
     }
     let id: string
     try {
-      id = await window.hub.createSession({ cwd, name, kind, jobTypeId: jobTypeId || undefined })
+      id = await window.hub.createSession({ projectId: project.id, name, kind, jobTypeId: jobTypeId || undefined })
     } catch (err) {
       // Electron prefixes errors thrown in the main process; show only the message.
       setError((err as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''))
@@ -71,27 +66,12 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
     <Modal onClose={onClose}>
       <form onSubmit={submit} className="form">
         <h2>New session</h2>
-        <label>
-          Folder
-          <div className="row">
-            <input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/project" autoFocus />
-            <button type="button" onClick={pick}>
-              Choose…
-            </button>
-          </div>
-        </label>
-        {!!hub?.recentFolders.length && (
-          <div className="recent">
-            {hub.recentFolders.slice(0, 6).map((f) => (
-              <button type="button" key={f} className={f === cwd ? 'chip on' : 'chip'} onClick={() => setCwd(f)} title={f}>
-                {f.split(/[\\/]/).pop()}
-              </button>
-            ))}
-          </div>
-        )}
+        <p className="muted form-note" title={project?.path}>
+          Starts in <strong>{project?.name}</strong>, so Claude sees every repo in it and loads its CLAUDE.md and skills.
+        </p>
         <label>
           Name (optional)
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Defaults to the project name" />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Defaults to the folder name" autoFocus />
         </label>
         <label>
           Run
@@ -133,7 +113,7 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
           <button type="button" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={!cwd || busy}>
+          <button type="submit" className="primary" disabled={!project || busy}>
             Start
           </button>
         </div>
@@ -203,6 +183,8 @@ export function commandItems(): PaletteItem[] {
   }
   const items: PaletteItem[] = [
     { label: 'New session', run: () => ui.openDialog({ type: 'newSession' }) },
+    { label: 'Open folder…', run: () => window.hub.openFolder() },
+    { label: 'New window', run: () => window.hub.newWindow() },
     { label: 'Go to next session that needs me', run: () => goToNextNeedsYou() },
     { label: 'Toggle file tree', run: () => ui.toggleFileTree() },
     { label: 'Close tab', run: () => closeActivePanel() },
@@ -222,11 +204,12 @@ export function commandItems(): PaletteItem[] {
       for (const step of session.steps)
         items.push({ label: `Go to step: ${step.name}`, detail: session.name, run: () => window.hub.setStep(session.id, step.id) })
     }
-    if (session.pr) items.push({ label: `Open PR #${session.pr.number}`, run: () => window.hub.openExternal(session.pr!.url) })
+    for (const repo of session.repos)
+      if (repo.pr) items.push({ label: `Open PR #${repo.pr.number} (${repo.name})`, run: () => window.hub.openExternal(repo.pr!.url) })
     for (const tag of ui.hub?.tags ?? [])
       items.push({ label: `Toggle tag: ${tag.name}`, detail: session.name, run: () => window.hub.toggleTag(session.id, tag.id) })
   }
-  for (const s of ui.hub?.sessions ?? [])
+  for (const s of (ui.hub?.sessions ?? []).filter((x) => x.projectId === ui.projectId))
     items.push({ label: `Go to session: ${s.name}`, run: () => openSession(s.id) })
   return items
 }
@@ -244,27 +227,26 @@ export function goToNextNeedsYou(): void {
 }
 
 function Palette({ mode, onClose }: { mode: 'files' | 'commands'; onClose: () => void }) {
-  const activeSessionId = useUi((s) => s.activeSessionId)
-  const session = useSession(activeSessionId)
+  const project = useProject()
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
   const [files, setFiles] = useState<string[]>()
   const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (mode !== 'files' || !session) return
-    void window.hub.listFiles(session.cwd).then((f) => setFiles(f ?? []))
-  }, [mode, session?.cwd])
+    if (mode !== 'files' || !project) return
+    void window.hub.listFiles(project.path).then(setFiles)
+  }, [mode, project?.path])
 
   const items = useMemo<PaletteItem[]>(() => {
     if (mode === 'commands') return commandItems()
-    if (!session) return []
-    const sep = session.cwd.includes('\\') ? '\\' : '/'
+    if (!project) return []
+    const sep = project.path.includes('\\') ? '\\' : '/'
     return (files ?? []).map((rel) => ({
       label: rel,
-      run: () => openFile(session.cwd + sep + (sep === '\\' ? rel.replace(/\//g, '\\') : rel))
+      run: () => openFile(project.path + sep + (sep === '\\' ? rel.replace(/\//g, '\\') : rel))
     }))
-  }, [mode, files, session])
+  }, [mode, files, project])
 
   const results = useMemo(
     () =>
@@ -294,7 +276,7 @@ function Palette({ mode, onClose }: { mode: 'files' | 'commands'; onClose: () =>
         <input
           autoFocus
           value={query}
-          placeholder={mode === 'files' ? (session ? 'Open file by name' : 'Open a session first') : 'Type a command'}
+          placeholder={mode === 'files' ? 'Open file by name' : 'Type a command'}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') {
@@ -310,7 +292,7 @@ function Palette({ mode, onClose }: { mode: 'files' | 'commands'; onClose: () =>
           }}
         />
         <div className="palette-list" ref={listRef}>
-          {mode === 'files' && session && !files && <div className="muted pad">Loading files…</div>}
+          {mode === 'files' && !files && <div className="muted pad">Loading files…</div>}
           {results.map((item, i) => (
             <div
               key={item.label + i}

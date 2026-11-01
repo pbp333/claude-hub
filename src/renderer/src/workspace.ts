@@ -1,11 +1,22 @@
 import type { DockviewApi, IDockviewPanel } from 'dockview-react'
-import { getSession, useUi } from './store'
+import { getProject, getSession, useUi } from './store'
 
 let api: DockviewApi | undefined
+/** A session to open once the workspace (dockview) is ready, e.g. from a notification click. */
+let pendingSession: string | undefined
 const listeners = new Set<(path: string, line?: number, column?: number) => void>()
 
-export function setWorkspaceApi(next: DockviewApi): void {
+export function setWorkspaceApi(next: DockviewApi | undefined): void {
   api = next
+  retryPendingSession()
+}
+
+/** Called when the workspace or the session list becomes ready. */
+export function retryPendingSession(): void {
+  if (!api || !pendingSession) return
+  const id = pendingSession
+  pendingSession = undefined
+  openSession(id)
 }
 
 export function sessionPanelId(sessionId: string): string {
@@ -17,7 +28,10 @@ export function fileName(path: string): string {
 }
 
 export function openSession(sessionId: string): void {
-  if (!api) return
+  if (!api || !getSession(sessionId)) {
+    pendingSession = sessionId
+    return
+  }
   const id = sessionPanelId(sessionId)
   const existing = api.getPanel(id)
   if (existing) {
@@ -74,7 +88,8 @@ export function closeActivePanel(): void {
 }
 
 export function saveLayout(): void {
-  if (api) window.hub.saveLayout(api.toJSON())
+  const project = getProject()
+  if (api && project) window.hub.saveLayout(project.id, api.toJSON())
 }
 
 function isTerminal(panel: IDockviewPanel | undefined): boolean {

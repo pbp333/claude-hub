@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { currentStep, effectiveTags, needsAttention } from '../../../shared/tags'
 import type { AttentionState, HubState, Session } from '../../../shared/types'
-import { useUi } from '../store'
+import { useProject, useUi } from '../store'
 import { openSession } from '../workspace'
 
 const STATE_LABEL: Record<AttentionState, string> = {
@@ -15,7 +15,7 @@ const STATE_LABEL: Record<AttentionState, string> = {
   quiet: 'Quiet'
 }
 
-type GroupBy = 'none' | 'project' | 'step' | string // string = a tag group name
+type GroupBy = 'none' | 'repo' | 'step' | string // string = a tag group name
 
 function sortSessions(sessions: Session[]): Session[] {
   return [...sessions].sort((a, b) => {
@@ -34,7 +34,7 @@ function groupSessions(hub: HubState, sessions: Session[], groupBy: GroupBy): [s
     groups.get(key)!.push(s)
   }
   for (const s of sessions) {
-    if (groupBy === 'project') add(hub.projects.find((p) => p.id === s.projectId)?.name ?? 'Other', s)
+    if (groupBy === 'repo') add(s.repos.map((r) => r.name).join(', ') || 'No repo yet', s)
     else if (groupBy === 'step') {
       const step = currentStep(s)
       add(step ? `${s.jobTypeName} · ${step.name}` : 'No job type', s)
@@ -48,12 +48,20 @@ function groupSessions(hub: HubState, sessions: Session[], groupBy: GroupBy): [s
 
 export function Sidebar() {
   const hub = useUi((s) => s.hub)
+  const project = useProject()
   const activeSessionId = useUi((s) => s.activeSessionId)
   const openDialog = useUi((s) => s.openDialog)
   const setSidebarOrder = useUi((s) => s.setSidebarOrder)
   const [filter, setFilter] = useState('')
   const [quick, setQuick] = useState<string>('all')
-  const [groupBy, setGroupBy] = useState<GroupBy>(() => localStorage.getItem('groupBy') ?? 'none')
+  const [groupBy, setGroupBy] = useState<GroupBy>(() => {
+    try {
+      const saved = localStorage.getItem('groupBy')
+      return saved && saved !== 'project' ? saved : 'none'
+    } catch {
+      return 'none'
+    }
+  })
 
   useEffect(() => {
     try {
@@ -64,33 +72,38 @@ export function Sidebar() {
   }, [groupBy])
 
   const groups = useMemo(() => {
-    if (!hub) return []
+    if (!hub || !project) return []
     const text = filter.trim().toLowerCase()
     const visible = hub.sessions.filter((s) => {
+      if (s.projectId !== project.id) return false
       const tags = effectiveTags(s, hub.tags)
       if (quick === 'needs-you' && !needsAttention(s)) return false
       if (quick.startsWith('tag:') && !tags.some((t) => t.tag.id === quick.slice(4))) return false
       if (!text) return true
-      const project = hub.projects.find((p) => p.id === s.projectId)?.name ?? ''
-      const haystack = [s.name, project, s.branch ?? '', currentStep(s)?.name ?? '', ...tags.map((t) => t.tag.name)]
+      const repos = s.repos.flatMap((r) => [r.name, r.branch ?? ''])
+      const haystack = [s.name, ...repos, currentStep(s)?.name ?? '', ...tags.map((t) => t.tag.name)]
       return haystack.join(' ').toLowerCase().includes(text)
     })
     return groupSessions(hub, sortSessions(visible), groupBy)
-  }, [hub, filter, quick, groupBy])
+  }, [hub, project, filter, quick, groupBy])
 
   useEffect(() => {
     setSidebarOrder(groups.flatMap(([, list]) => list.map((s) => s.id)))
   }, [groups, setSidebarOrder])
 
-  if (!hub) return <aside className="sidebar" />
+  if (!hub || !project) return <aside className="sidebar" />
+  const mine = hub.sessions.filter((s) => s.projectId === project.id)
+  const overlaps = repoOverlaps(mine)
   const tagGroups = [...new Set(hub.tags.map((t) => t.group).filter((g): g is string => !!g))]
-  const usedTags = hub.tags.filter((t) => hub.sessions.some((s) => effectiveTags(s, hub.tags).some((e) => e.tag.id === t.id)))
-  const needCount = hub.sessions.filter(needsAttention).length
+  const usedTags = hub.tags.filter((t) => mine.some((s) => effectiveTags(s, hub.tags).some((e) => e.tag.id === t.id)))
+  const needCount = mine.filter(needsAttention).length
 
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <span className="sidebar-title">Sessions</span>
+        <span className="sidebar-title" title={project.path}>
+          {project.name}
+        </span>
         <button className="primary" onClick={() => openDialog({ type: 'newSession' })} title="New session">
           + New
         </button>
@@ -122,7 +135,7 @@ export function Sidebar() {
         Group by
         <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)}>
           <option value="none">Nothing</option>
-          <option value="project">Project</option>
+          <option value="repo">Repo</option>
           <option value="step">Job step</option>
           {tagGroups.map((g) => (
             <option key={g} value={g}>
@@ -132,16 +145,16 @@ export function Sidebar() {
         </select>
       </label>
       <div className="session-list">
-        {hub.sessions.length === 0 && (
+        {mine.length === 0 && (
           <div className="empty">
-            No sessions yet. Press <kbd>+ New</kbd> to start Claude in a folder.
+            No sessions yet. Press <kbd>+ New</kbd> to start Claude in {project.name}.
           </div>
         )}
         {groups.map(([name, list]) => (
           <div key={name} className="session-group">
             {name && <div className="group-name">{name}</div>}
             {list.map((s) => (
-              <SessionRow key={s.id} hub={hub} session={s} active={s.id === activeSessionId} />
+              <SessionRow key={s.id} hub={hub} session={s} active={s.id === activeSessionId} overlaps={overlaps.get(s.id)} />
             ))}
           </div>
         ))}
@@ -160,8 +173,29 @@ export function Sidebar() {
   )
 }
 
-function SessionRow({ hub, session: s, active }: { hub: HubState; session: Session; active: boolean }) {
-  const project = hub.projects.find((p) => p.id === s.projectId)
+/** For each running session, the other running sessions that have touched the same repos. */
+function repoOverlaps(sessions: Session[]): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  const running = sessions.filter((s) => s.running)
+  for (const s of running) {
+    const notes: string[] = []
+    for (const other of running) {
+      if (other.id === s.id) continue
+      const shared = s.repos.filter((r) => other.repos.some((o) => o.path === r.path)).map((r) => r.name)
+      if (shared.length) notes.push(`${shared.join(', ')} (also in "${other.name}")`)
+    }
+    if (notes.length) out.set(s.id, notes)
+  }
+  return out
+}
+
+/** The PR behind a GitHub tag: the first repo whose PR meets a rule that sets this tag. */
+function prForTag(hub: HubState, s: Session, tagId: string): string | undefined {
+  const conditions = new Set(hub.rules.filter((r) => r.setTag === tagId).map((r) => r.when))
+  return s.repos.find((r) => r.pr?.conditions.some((c) => conditions.has(c)))?.pr?.url
+}
+
+function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; session: Session; active: boolean; overlaps?: string[] }) {
   const step = currentStep(s)
   const stepIndex = s.steps && step ? s.steps.indexOf(step) : -1
   const tags = effectiveTags(s, hub.tags)
@@ -182,10 +216,22 @@ function SessionRow({ hub, session: s, active }: { hub: HubState; session: Sessi
           {s.name}
           {s.kind === 'shell' && <span className="kind">shell</span>}
         </div>
-        <div className="session-sub">
-          {project?.name}
-          {s.branch ? ` · ${s.branch}` : ''} · {STATE_LABEL[s.attentionState]}
-        </div>
+        <div className="session-sub">{STATE_LABEL[s.attentionState]}</div>
+        {s.repos.length > 0 && (
+          <div className="session-repos" title={s.repos.map((r) => r.path).join('\n')}>
+            {s.repos.map((r) => (
+              <span key={r.path}>
+                {r.name}
+                {r.branch && <span className="muted"> ({r.branch})</span>}
+              </span>
+            ))}
+          </div>
+        )}
+        {overlaps && (
+          <div className="session-overlap" title="Two sessions editing the same repo can overwrite each other's changes.">
+            ⚠ Shared: {overlaps.join('; ')}
+          </div>
+        )}
         {step && s.steps && (
           <div className="session-step">
             <span>
@@ -217,9 +263,10 @@ function SessionRow({ hub, session: s, active }: { hub: HubState; session: Sessi
                 style={{ borderColor: tag.color, color: tag.color }}
                 title={source === 'auto' ? 'From GitHub, click to open the PR' : source === 'step' ? 'Set by the current step' : 'Manual tag'}
                 onClick={(e) => {
-                  if (source === 'auto' && s.pr) {
+                  const url = source === 'auto' ? prForTag(hub, s, tag.id) : undefined
+                  if (url) {
                     e.stopPropagation()
-                    window.hub.openExternal(s.pr.url)
+                    window.hub.openExternal(url)
                   }
                 }}
               >
