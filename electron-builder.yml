@@ -1,0 +1,23 @@
+appId: com.pbp333.claudehub
+productName: Claude Hub
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - node_modules/node-pty/**
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  identity: null
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
