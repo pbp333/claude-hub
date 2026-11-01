@@ -22,7 +22,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # npm ci is too strict here: lockfiles written on macOS drop Windows-only optional
+      # packages (an npm bug), and npm ci then refuses to install. npm install fills them in.
+      - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
@@ -47,7 +49,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # npm ci is too strict here: lockfiles written on macOS drop Windows-only optional
+      # packages (an npm bug), and npm ci then refuses to install. npm install fills them in.
+      - run: npm install --no-audit --no-fund
       - run: npm run ${{ matrix.script }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
