@@ -2,17 +2,28 @@ appId: com.pbp333.claudehub
 productName: Claude Hub
 directories:
   output: dist
-  buildResources: resources
 files:
   - out/**
   - package.json
 asarUnpack:
   - node_modules/node-pty/**
+# Packaged builds can't be turned into a plain Node runtime (ELECTRON_RUN_AS_NODE,
+# NODE_OPTIONS, --inspect) and only load their own, integrity-checked app.asar.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
+  # Flipping fuses invalidates the ad-hoc signature that unsigned Apple Silicon builds need.
+  resetAdHocDarwinSignature: true
 mac:
   category: public.app-category.developer-tools
   target:
     - target: dmg
       arch: [x64, arm64]
+  # Unsigned: no Apple Developer ID. macOS asks for right-click → Open the first time.
   identity: null
 win:
   target:

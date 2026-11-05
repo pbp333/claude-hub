@@ -1,12 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, Rectangle } from 'electron'
 import { watch, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { effectiveTags } from '../shared/tags'
 import type { NewSessionOptions, Session, UiCommand, WindowInfo } from '../shared/types'
 import { CONFIG_FILES } from './config'
 import { loadLoginShellEnv } from './env'
-import { FolderWatcher, listDir, readText, resolveLinks, writeText } from './files'
+import { FolderWatcher, isInside, listDir, readText, resolveInside, resolveLinks, writeText } from './files'
 import { gitStatus, headContent, listFiles } from './git'
 import { SessionManager } from './sessions'
 import { JsonStore } from './store'
@@ -23,15 +24,39 @@ interface SavedWindow {
   bounds?: Rectangle
 }
 
+// Only one copy of the app runs: a second launch just focuses it (see 'second-instance').
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+  process.exit(0)
+}
+
+/** Dev aids (CLAUDE_HUB_* env vars, the dev server URL) work only in unpackaged builds. */
+const DEV = !app.isPackaged
+const env = (name: string) => (DEV ? process.env[name] : undefined)
+
 const windows = new Map<number, HubWindow>()
 let manager: SessionManager
 let stateTimer: NodeJS.Timeout | undefined
 let quitting = false
 let menuKey = ''
+/** Windows open when the last one was closed (Windows/Linux quit then), so they reopen next time. */
+let lastWindows: SavedWindow[] | undefined
+/** Kept referenced: a garbage-collected Notification loses its click handler. */
+const notifications = new Set<Notification>()
 
 // Dev aid: a separate data folder, so test runs never touch real sessions.
-if (process.env.CLAUDE_HUB_USER_DATA) app.setPath('userData', process.env.CLAUDE_HUB_USER_DATA)
+if (env('CLAUDE_HUB_USER_DATA')) app.setPath('userData', env('CLAUDE_HUB_USER_DATA')!)
 const store = new JsonStore(join(app.getPath('userData'), 'data'))
+
+const devServerUrl = env('ELECTRON_RENDERER_URL')
+const appPageUrl = devServerUrl ?? pathToFileURL(join(__dirname, '../renderer/index.html')).href
+
+/** True for the app's own page; anything else (a dropped file, a navigated frame) gets no API. */
+function isAppPage(url: string | undefined): boolean {
+  if (!url) return false
+  const page = url.split('#')[0].split('?')[0]
+  return devServerUrl ? page.startsWith(new URL(devServerUrl).origin + '/') : page === appPageUrl
+}
 
 function live(): HubWindow[] {
   return [...windows.values()].filter((w) => !w.win.isDestroyed())
@@ -97,7 +122,12 @@ const host = {
   notify(session: Session, body: string) {
     if (!manager.config.settings.notifications || !Notification.isSupported()) return
     const n = new Notification({ title: session.name, body, silent: false })
-    n.on('click', () => focusSession(session.id))
+    notifications.add(n)
+    n.on('click', () => {
+      notifications.delete(n)
+      focusSession(session.id)
+    })
+    n.on('close', () => notifications.delete(n))
     n.show()
   },
   isViewing(sessionId: string) {
@@ -141,7 +171,7 @@ function updateBadge(): void {
 // ---- windows -------------------------------------------------------------
 
 function saveWindows(): void {
-  if (quitting) return
+  if (quitting || lastWindows) return
   store.writeSoon('windows.json', windowsSnapshot, 500)
 }
 
@@ -149,7 +179,19 @@ function windowsSnapshot(): SavedWindow[] {
   return live().map((w) => ({ projectId: w.projectId, bounds: w.win.getNormalBounds() }))
 }
 
-function createWindow(projectId?: string, bounds?: Rectangle): HubWindow {
+/** Saved bounds, unless no display shows the window's top-left area any more (monitor unplugged). */
+function visibleBounds(bounds?: Rectangle): Partial<Rectangle> | undefined {
+  if (!bounds) return undefined
+  const onScreen = screen.getAllDisplays().some(({ workArea: a }) => {
+    const x = bounds.x + 40
+    const y = bounds.y + 20
+    return x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height
+  })
+  return onScreen ? bounds : { width: bounds.width, height: bounds.height }
+}
+
+function createWindow(projectId?: string, savedBounds?: Rectangle): HubWindow {
+  const bounds = visibleBounds(savedBounds)
   const win = new BrowserWindow({
     width: bounds?.width ?? 1400,
     height: bounds?.height ?? 900,
@@ -162,8 +204,10 @@ function createWindow(projectId?: string, bounds?: Rectangle): HubWindow {
     title: 'Claude Hub',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
-      contextIsolation: true
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: false
     }
   })
   const hw: HubWindow = { win }
@@ -172,11 +216,15 @@ function createWindow(projectId?: string, bounds?: Rectangle): HubWindow {
   setWorkspace(hw, projectId)
   win.on('ready-to-show', () => win.show())
   // Dev aid: CLAUDE_HUB_DEBUG=1 prints the renderer console to stdout.
-  if (process.env.CLAUDE_HUB_DEBUG)
+  if (env('CLAUDE_HUB_DEBUG'))
     win.webContents.on('console-message', (e) => console.log(`[renderer:${e.level}] ${e.message}`))
   win.on('focus', () => hw.activeSessionId && manager.markRead(hw.activeSessionId))
   win.on('moved', saveWindows)
   win.on('resized', saveWindows)
+  // Windows/Linux quit when the last window closes; remember it before it's gone.
+  win.on('close', () => {
+    if (process.platform !== 'darwin' && live().length === 1 && !quitting) lastWindows = windowsSnapshot()
+  })
   win.on('closed', () => {
     windows.delete(id)
     saveWindows()
@@ -186,7 +234,15 @@ function createWindow(projectId?: string, bounds?: Rectangle): HubWindow {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
+  // The window only ever shows the app. Dropping a file or following a link must not
+  // navigate it: the new page would get the preload's API.
+  const stay = (e: Electron.Event, url: string) => {
+    if (!isAppPage(url)) e.preventDefault()
+  }
+  win.webContents.on('will-navigate', stay)
+  win.webContents.on('will-redirect', stay)
+  win.webContents.on('will-attach-webview', (e) => e.preventDefault())
+  if (devServerUrl) void win.loadURL(devServerUrl)
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
   return hw
 }
@@ -385,51 +441,128 @@ function sessionContextMenu(sessionId: string, hw: HubWindow): void {
 
 // ---- IPC -----------------------------------------------------------------
 
-function registerIpc(): void {
-  ipcMain.handle('get-state', () => manager.snapshot())
-  ipcMain.handle('window-info', (e): WindowInfo => ({ projectId: fromEvent(e)?.projectId }))
-  ipcMain.on('open-folder', (e) => void pickFolder(fromEvent(e)))
-  ipcMain.on('open-recent', (e, folder: string) => openFolderPath(folder, fromEvent(e)))
-  ipcMain.on('new-window', () => show(createWindow()))
-  ipcMain.handle('create-session', async (_e, opts: NewSessionOptions) => (await manager.create(opts)).id)
-  ipcMain.on('restart-session', (_e, id: string) => manager.restart(id))
-  ipcMain.on('close-session', (_e, id: string) => manager.close(id))
-  ipcMain.on('rename-session', (_e, id: string, name: string) => manager.rename(id, name))
-  ipcMain.on('session-menu', (e, id: string) => {
-    const hw = fromEvent(e)
-    if (hw) sessionContextMenu(id, hw)
+// ---- IPC -----------------------------------------------------------------
+// Every handler checks that the caller is the app's own page and that arguments have the
+// expected types; file access is limited to open workspaces and the config folder.
+
+class IpcError extends Error {}
+
+const str = (v: unknown, max = 4096): string => {
+  if (typeof v !== 'string' || v.length > max) throw new IpcError('expected text')
+  return v
+}
+const int = (v: unknown): number => {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 10000) throw new IpcError('expected a number')
+  return v
+}
+
+function trusted(e: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return isAppPage(e.senderFrame?.url) && windows.has(e.sender.id)
+}
+
+function handle(channel: string, fn: (e: IpcMainInvokeEvent, ...args: unknown[]) => unknown): void {
+  ipcMain.handle(channel, (e, ...args) => {
+    if (!trusted(e)) throw new Error('not allowed')
+    return fn(e, ...args)
   })
-  ipcMain.on('set-active-session', (e, id: string | undefined) => {
+}
+
+function on(channel: string, fn: (e: IpcMainEvent, ...args: unknown[]) => void): void {
+  ipcMain.on(channel, (e, ...args) => {
+    if (!trusted(e)) return
+    try {
+      fn(e, ...args)
+    } catch (err) {
+      if (!(err instanceof IpcError)) console.error(`ipc ${channel}:`, err)
+    }
+  })
+}
+
+/** Folders the UI may read and write in: every workspace, plus the config folder. */
+function allowedRoots(): string[] {
+  return [...manager.projects.map((p) => p.path), store.dir]
+}
+
+async function allowedPath(path: unknown): Promise<string> {
+  const real = await resolveInside(str(path), allowedRoots())
+  if (!real) throw new Error('That file is outside the open folders')
+  return real
+}
+
+function workspacePath(path: unknown): string {
+  const p = str(path)
+  if (!manager.projects.some((project) => project.path === p)) throw new Error('not an open folder')
+  return p
+}
+
+function registerIpc(): void {
+  handle('get-state', () => manager.snapshot())
+  handle('window-info', (e): WindowInfo => ({ projectId: fromEvent(e)?.projectId }))
+  on('open-folder', (e) => void pickFolder(fromEvent(e)))
+  on('open-recent', (e, folder) => {
+    const f = str(folder)
+    // Only folders the app already knows; any other folder goes through the picker.
+    if (manager.recentFolders.includes(f) || manager.projects.some((p) => p.path === f)) openFolderPath(f, fromEvent(e))
+  })
+  on('new-window', () => show(createWindow()))
+  handle('create-session', async (_e, opts) => {
+    const o = (opts ?? {}) as Record<string, unknown>
+    const kind = o.kind === 'shell' ? 'shell' : 'claude'
+    const session = await manager.create({
+      projectId: str(o.projectId),
+      name: o.name === undefined ? undefined : str(o.name, 200),
+      kind,
+      jobTypeId: o.jobTypeId === undefined ? undefined : str(o.jobTypeId, 200)
+    } satisfies NewSessionOptions)
+    return session.id
+  })
+  on('restart-session', (_e, id) => manager.restart(str(id)))
+  on('close-session', (_e, id) => manager.close(str(id)))
+  on('rename-session', (_e, id, name) => manager.rename(str(id), str(name, 200)))
+  on('session-menu', (e, id) => {
+    const hw = fromEvent(e)
+    if (hw) sessionContextMenu(str(id), hw)
+  })
+  on('set-active-session', (e, id) => {
     const hw = fromEvent(e)
     if (!hw) return
-    hw.activeSessionId = id
-    if (id && hw.win.isFocused()) manager.markRead(id)
+    hw.activeSessionId = id === undefined || id === null ? undefined : str(id)
+    if (hw.activeSessionId && hw.win.isFocused()) manager.markRead(hw.activeSessionId)
   })
-  ipcMain.on('toggle-tag', (_e, id: string, tagId: string) => manager.toggleTag(id, tagId))
-  ipcMain.on('next-step', (_e, id: string) => manager.nextStep(id))
-  ipcMain.on('set-step', (_e, id: string, stepId: string) => manager.setStep(id, stepId))
+  on('toggle-tag', (_e, id, tagId) => manager.toggleTag(str(id), str(tagId)))
+  on('next-step', (_e, id) => manager.nextStep(str(id)))
+  on('set-step', (_e, id, stepId) => manager.setStep(str(id), str(stepId)))
 
-  ipcMain.on('pty-write', (_e, id: string, data: string) => manager.write(id, data))
-  ipcMain.on('pty-resize', (_e, id: string, cols: number, rows: number) => manager.resize(id, cols, rows))
-  ipcMain.handle('pty-buffer', (_e, id: string) => manager.buffer(id))
+  on('pty-write', (_e, id, data) => manager.write(str(id), str(data, 1024 * 1024)))
+  on('pty-resize', (_e, id, cols, rows) => manager.resize(str(id), int(cols), int(rows)))
+  handle('pty-buffer', (_e, id) => manager.buffer(str(id)))
 
-  ipcMain.handle('list-dir', (_e, dir: string) => listDir(dir))
-  ipcMain.handle('read-file', (_e, path: string) => readText(path))
-  ipcMain.handle('write-file', (_e, path: string, content: string) => writeText(path, content))
-  ipcMain.handle('head-content', (_e, path: string) => headContent(path))
-  ipcMain.handle('git-status', (_e, workspace: string) => gitStatus(workspace))
-  ipcMain.handle('list-files', (_e, workspace: string) => listFiles(workspace))
-  ipcMain.handle('resolve-links', (_e, cwd: string, candidates: string[]) => resolveLinks(cwd, candidates))
-  ipcMain.handle('config-path', (_e, file: string) => manager.configFilePath(file))
+  handle('list-dir', async (_e, dir) => listDir(await allowedPath(dir)))
+  handle('read-file', async (_e, path) => readText(await allowedPath(path)))
+  handle('write-file', async (_e, path, content) => writeText(await allowedPath(path), str(content, 50 * 1024 * 1024)))
+  handle('head-content', async (_e, path) => headContent(await allowedPath(path)))
+  handle('git-status', (_e, workspace) => gitStatus(workspacePath(workspace)))
+  handle('list-files', (_e, workspace) => listFiles(workspacePath(workspace)))
+  handle('resolve-links', async (_e, cwd, candidates) => {
+    const root = workspacePath(cwd)
+    if (!Array.isArray(candidates)) return []
+    const found = await resolveLinks(root, candidates.slice(0, 50).map((c) => str(c, 1024)))
+    // Links only open files the editor may read.
+    const roots = allowedRoots()
+    return found.filter((f) => roots.some((r) => isInside(r, f.path)))
+  })
+  handle('config-path', (_e, file) => manager.configFilePath(str(file)))
 
   // One layout per workspace, so each folder reopens with its own tabs and splits.
-  const layoutFile = (projectId: string) => `layout-${projectId.replace(/[^\w-]/g, '')}.json`
-  ipcMain.handle('load-layout', (_e, projectId: string) => store.read<unknown>(layoutFile(projectId), null))
-  ipcMain.on('save-layout', (_e, projectId: string, layout: unknown) =>
+  const layoutFile = (projectId: unknown) => `layout-${str(projectId).replace(/[^\w-]/g, '')}.json`
+  handle('load-layout', (_e, projectId) => store.readState<unknown>(layoutFile(projectId), null))
+  on('save-layout', (_e, projectId, layout) => {
+    if (JSON.stringify(layout ?? null).length > 5 * 1024 * 1024) return
     store.writeSoon(layoutFile(projectId), () => layout, 1000)
-  )
-  ipcMain.on('open-external', (_e, url: string) => {
-    if (/^https?:\/\//.test(url)) void shell.openExternal(url)
+  })
+  on('open-external', (_e, url) => {
+    const u = str(url)
+    if (/^https?:\/\//.test(u)) void shell.openExternal(u)
   })
 }
 
@@ -448,12 +581,10 @@ function watchConfig(): void {
 
 // ---- app lifecycle ---------------------------------------------------------
 
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) app.quit()
 app.on('second-instance', () => {
   const hw = focused()
   if (hw) show(hw)
-  else show(createWindow())
+  else if (manager) show(createWindow())
 })
 
 app.whenReady().then(async () => {
@@ -464,40 +595,52 @@ app.whenReady().then(async () => {
   buildMenu()
   watchConfig()
 
+  // Start the hook server before any window exists, so no session can spawn without it.
+  const saved = store
+    .readState<SavedWindow[]>('windows.json', [], Array.isArray)
+    .filter((w) => !w.projectId || manager.project(w.projectId))
+  await manager.start(saved.map((w) => w.projectId).filter((p): p is string => !!p))
   // Reopen the windows from last time, each with its workspace.
-  const saved = store.read<SavedWindow[]>('windows.json', []).filter((w) => !w.projectId || manager.project(w.projectId))
   if (saved.length) for (const w of saved) createWindow(w.projectId, w.bounds)
   else createWindow()
-  await manager.start(saved.map((w) => w.projectId).filter((p): p is string => !!p))
 
-  // Dev aid: CLAUDE_HUB_DEMO="claude|shell:<folder>[:jobTypeId]" opens the folder and starts a session.
-  const demo = process.env.CLAUDE_HUB_DEMO?.match(/^(claude|shell):([^:]+)(?::(.+))?$/)
+  if (DEV) await runDevAids()
+})
+
+/** Dev aids for testing without clicking through the UI; see the README. Unpackaged builds only. */
+async function runDevAids(): Promise<void> {
+  // CLAUDE_HUB_DEMO="claude|shell:<folder>[:jobTypeId]" opens the folder and starts a session.
+  const demo = env('CLAUDE_HUB_DEMO')?.match(/^(claude|shell):([^:]+)(?::(.+))?$/)
   if (demo) {
     openFolderPath(demo[2], live()[0])
-    const projectId = live()[0].projectId!
-    const session = await manager.create({ projectId, kind: demo[1] as 'claude' | 'shell', jobTypeId: demo[3] })
     const hw = live()[0]
+    const session = await manager.create({ projectId: hw.projectId!, kind: demo[1] as 'claude' | 'shell', jobTypeId: demo[3] })
     hw.win.webContents.once('did-finish-load', () => setTimeout(() => command({ type: 'focusSession', sessionId: session.id }, hw), 500))
     // CLAUDE_HUB_DEMO_OPEN="<path>:<line>" opens a file the way a terminal link click does.
-    const open = process.env.CLAUDE_HUB_DEMO_OPEN?.match(/^(.+):(\d+)$/)
+    const open = env('CLAUDE_HUB_DEMO_OPEN')?.match(/^(.+):(\d+)$/)
     if (open) setTimeout(() => command({ type: 'openFile', path: open[1], line: Number(open[2]) }, hw), 4000)
-    if (process.env.CLAUDE_HUB_DEMO_INPUT)
-      setTimeout(
-        () => manager.write(session.id, JSON.parse(`"${process.env.CLAUDE_HUB_DEMO_INPUT}"`)),
-        Number(process.env.CLAUDE_HUB_DEMO_INPUT_DELAY ?? 2500)
-      )
+    // CLAUDE_HUB_DEMO_INPUT is typed into the session; it is a JSON string body ("\r" = Enter).
+    const input = env('CLAUDE_HUB_DEMO_INPUT')
+    if (input) {
+      let text = input
+      try {
+        text = JSON.parse(JSON.stringify(input).replace(/\\\\/g, '\\'))
+      } catch {
+        // use as is
+      }
+      setTimeout(() => manager.write(session.id, text), Number(env('CLAUDE_HUB_DEMO_INPUT_DELAY') ?? 2500))
+    }
   }
-
-  // Dev aid: CLAUDE_HUB_SCREENSHOT=/path.png captures the first window after a delay and quits.
-  const shot = process.env.CLAUDE_HUB_SCREENSHOT
+  // CLAUDE_HUB_SCREENSHOT=/path.png captures the first window after a delay and quits.
+  const shot = env('CLAUDE_HUB_SCREENSHOT')
   if (shot) {
     setTimeout(async () => {
       const image = await live()[0].win.webContents.capturePage()
       writeFileSync(shot, image.toPNG())
       app.quit()
-    }, Number(process.env.CLAUDE_HUB_SCREENSHOT_DELAY ?? 6000))
+    }, Number(env('CLAUDE_HUB_SCREENSHOT_DELAY') ?? 6000))
   }
-})
+}
 
 // macOS: clicking the Dock icon with no windows open brings one back.
 app.on('activate', () => {
@@ -505,10 +648,12 @@ app.on('activate', () => {
 })
 
 app.on('before-quit', () => {
+  if (!manager) return
   // Remember the open windows before they close (closing them would empty the list).
-  store.flush('windows.json', windowsSnapshot)
+  store.flush('windows.json', () => lastWindows ?? windowsSnapshot())
   quitting = true
-  manager?.shutdown()
+  store.flushAll()
+  manager.shutdown()
   folderWatcher.close()
 })
 

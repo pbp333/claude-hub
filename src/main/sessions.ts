@@ -1,3 +1,4 @@
+import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, resolve } from 'node:path'
@@ -13,9 +14,9 @@ import type {
   SessionRepo
 } from '../shared/types'
 import { CONFIG_FILES, loadConfig, type LoadedConfig } from './config'
-import { getEnv, which } from './env'
+import { cmdShimCommandLine, getEnv, which } from './env'
 import { currentBranch, fetchPr, findRepos, repoFor, toPosix } from './git'
-import { HookServer, shouldNotify, stateForEvent, type HookEvent } from './hooks'
+import { HookServer, isClaudeSessionId, shouldNotify, showsDialog, stateForEvent, type HookEvent } from './hooks'
 import { PtyManager } from './pty'
 import type { JsonStore } from './store'
 
@@ -27,6 +28,8 @@ export interface Host {
   /** True when the window is focused and this session's tab is the active one. */
   isViewing(sessionId: string): boolean
 }
+
+const debug = !!process.env.CLAUDE_HUB_DEBUG && !app.isPackaged
 
 const QUIET_MS = 5000
 const READY_QUIET_MS = 1500
@@ -62,6 +65,8 @@ export class SessionManager {
   private runtime = new Map<string, Runtime>()
   private pollTimer?: NodeJS.Timeout
   private quitting = false
+  /** Spawn generation per session; hook events carry "<id>.<generation>". */
+  private generations = new Map<string, number>()
   /** PR lookups by repo + branch, shared by every session working in that repo. */
   private prCache = new Map<string, PrCacheEntry>()
 
@@ -70,9 +75,10 @@ export class SessionManager {
     private host: Host
   ) {
     this.config = loadConfig(store)
-    this.projects = store.read<Project[]>('projects.json', [])
-    this.recentFolders = store.read<string[]>('recent.json', [])
-    this.sessions = store.read<Session[]>('sessions.json', []).map(migrateSession)
+    // A damaged state file is set aside (<file>.corrupt) rather than stopping the app from starting.
+    this.projects = store.readState<Project[]>('projects.json', [], Array.isArray)
+    this.recentFolders = store.readState<string[]>('recent.json', [], Array.isArray)
+    this.sessions = store.readState<Session[]>('sessions.json', [], Array.isArray).map(migrateSession)
     this.hooks = new HookServer((e) => this.onHook(e))
     this.ptys = new PtyManager(
       (id, data) => this.onPtyData(id, data),
@@ -185,13 +191,14 @@ export class SessionManager {
   close(id: string): void {
     this.ptys.remove(id)
     this.clearRuntime(id)
+    this.retireSpawnKey(id)
     this.sessions = this.sessions.filter((s) => s.id !== id)
     this.changed()
   }
 
   rename(id: string, name: string): void {
     this.update(id, (s) => {
-      if (name.trim()) s.name = name.trim()
+      if (name.trim()) s.name = name.trim().slice(0, 200)
     })
   }
 
@@ -203,6 +210,7 @@ export class SessionManager {
       // The user answered the dialog: wait for the CLI to settle again, then re-check.
       rt.awaitingUser = false
       s.attentionState = 'starting'
+      clearTimeout(rt.readyDeadline)
       rt.readyDeadline = setTimeout(() => this.onReady(id), READY_MAX_MS)
       this.changed()
     }
@@ -232,14 +240,19 @@ export class SessionManager {
 
   private spawn(session: Session, resume: boolean): void {
     const settings = this.config.settings
+    // Each process gets a new spawn key and token: hooks from a process that was replaced
+    // (restart) or from another session are rejected or ignored.
+    this.retireSpawnKey(session.id)
+    const generation = (this.generations.get(session.id) ?? 0) + 1
+    this.generations.set(session.id, generation)
+    const spawnKey = `${session.id}.${generation}`
     const env: NodeJS.ProcessEnv = {
       ...getEnv(),
-      CLAUDE_HUB_SESSION_ID: session.id,
-      CLAUDE_HUB_TOKEN: this.hooks.token,
-      CLAUDE_HUB_PORT: String(this.hooks.port)
+      CLAUDE_HUB_SESSION_ID: spawnKey,
+      CLAUDE_HUB_TOKEN: this.hooks.register(spawnKey)
     }
     let file: string
-    let args: string[]
+    let args: string[] | string
     if (session.kind === 'shell') {
       file = settings.shell || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/zsh')
       args = process.platform === 'win32' ? [] : ['-l']
@@ -257,15 +270,17 @@ export class SessionManager {
         })
         return
       }
-      args = [...settings.claudeArgs]
-      if (settings.hooksEnabled) args.push('--settings', this.store.path('hub-hooks.json'))
-      if (resume && session.claudeSessionId) args.push('--resume', session.claudeSessionId)
-      // .cmd shims can't be spawned directly on Windows.
+      const claudeArgs = [...settings.claudeArgs]
+      if (settings.hooksEnabled) claudeArgs.push('--settings', this.store.path('hub-hooks.json'))
+      if (resume && session.claudeSessionId && isClaudeSessionId(session.claudeSessionId))
+        claudeArgs.push('--resume', session.claudeSessionId)
+      // .cmd shims can't be spawned directly on Windows; cmd.exe gets one escaped command line.
       if (/\.(cmd|bat)$/i.test(exe)) {
         file = process.env.ComSpec || 'cmd.exe'
-        args = ['/d', '/c', exe, ...args]
+        args = cmdShimCommandLine(exe, claudeArgs)
       } else {
         file = exe
+        args = claudeArgs
       }
     }
     this.clearRuntime(session.id)
@@ -353,6 +368,7 @@ export class SessionManager {
     if (this.quitting) return
     this.ptys.print(id, `\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`)
     this.clearRuntime(id)
+    this.retireSpawnKey(id)
     this.update(id, (s) => {
       s.running = false
       s.attentionState = 'exited'
@@ -367,10 +383,16 @@ export class SessionManager {
   // ---- hook events -----------------------------------------------------
 
   private onHook(event: HookEvent): void {
-    if (process.env.CLAUDE_HUB_DEBUG) console.log(`[hook] ${event.name} ${event.hubSessionId}`)
-    const s = this.get(event.hubSessionId)
+    if (debug) console.log(`[hook] ${event.name} ${event.hubSessionId}`)
+    const dot = event.hubSessionId.lastIndexOf('.')
+    const id = event.hubSessionId.slice(0, dot)
+    // Only the current process of a session counts; a late event from a replaced one is dropped.
+    if (dot < 0 || `${id}.${this.generations.get(id)}` !== event.hubSessionId) return
+    const s = this.get(id)
     if (!s) return
-    const claudeId = typeof event.payload.session_id === 'string' ? event.payload.session_id : undefined
+    // Claude's session id ends up on the command line (--resume), so take only real ids.
+    const raw = event.payload.session_id
+    const claudeId = typeof raw === 'string' && isClaudeSessionId(raw) ? raw : undefined
     s.hookSeen = true
     if (claudeId) s.claudeSessionId = claudeId
     s.lastActivityAt = new Date().toISOString()
@@ -404,7 +426,7 @@ export class SessionManager {
   private async trackRepos(s: Session, event: HookEvent): Promise<void> {
     if (event.name !== 'PreToolUse' && event.name !== 'PostToolUse' && event.name !== 'UserPromptSubmit') return
     const repos = await findRepos(s.cwd)
-    if (!repos.length) return
+    if (!repos.length || !this.get(s.id)) return
     const candidates: string[] = []
     const absolute = (p: unknown) => (typeof p === 'string' && p ? (isAbsolute(p) ? p : resolve(s.cwd, p)) : undefined)
     const cwd = absolute(event.payload.cwd)
@@ -424,12 +446,13 @@ export class SessionManager {
       for (const repo of repos) {
         if (repo === root) continue
         const rel = repo.slice(root.length + 1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        // "cd recipe-app", "recipe-app/src/x.ts", "git -C ./recipe-app status", but not "recipe-app-backend".
+        // "cd web", "web/src/x.ts", "git -C ./web status", but not "web-admin".
         if (new RegExp(`(^|[\\s'"=/])(\\./)?${rel}(?=$|[\\s'"/;&|)])`).test(input.command)) found.add(repo)
       }
     }
     let added = false
     for (const repo of found) {
+      if (!this.get(s.id)) return
       if (!s.repos.some((r) => r.path === repo)) {
         await this.addRepo(s, repo)
         added = true
@@ -448,7 +471,7 @@ export class SessionManager {
   }
 
   private setState(s: Session, state: AttentionState, message?: string): void {
-    if (process.env.CLAUDE_HUB_DEBUG) console.log(`[state] ${s.name}: ${s.attentionState} -> ${state}`)
+    if (debug) console.log(`[state] ${s.name}: ${s.attentionState} -> ${state}`)
     s.attentionState = state
     s.updatedAt = new Date().toISOString()
     if (shouldNotify(state) && !this.host.isViewing(s.id)) {
@@ -541,6 +564,7 @@ export class SessionManager {
   }
 
   private schedulePrCheck(id: string, delayMs: number): void {
+    if (!this.get(id)) return
     const rt = this.rt(id)
     clearTimeout(rt.prTimer)
     rt.prTimer = setTimeout(() => void this.checkPr(id, true), delayMs)
@@ -565,13 +589,19 @@ export class SessionManager {
     if (cached && (cached.error ? Date.now() - cached.at < PR_BACKOFF_MS : !fresh && Date.now() - cached.at < maxAge))
       return cached
     const entry: PrCacheEntry = { at: Date.now() }
-    entry.pending = fetchPr(repo.path, this.config.settings.botLogins).then(({ pr, error }) => {
-      entry.pr = pr
-      // Rate limits and auth problems: back off instead of hammering gh.
-      entry.error = !!error
-      entry.at = Date.now()
-      entry.pending = undefined
-    })
+    entry.pending = fetchPr(repo.path, this.config.settings.botLogins)
+      .then(({ pr, error }) => {
+        entry.pr = pr
+        // Rate limits and auth problems: back off instead of hammering gh.
+        entry.error = !!error
+      })
+      .catch(() => {
+        entry.error = true
+      })
+      .finally(() => {
+        entry.at = Date.now()
+        entry.pending = undefined
+      })
     this.prCache.set(key, entry)
     await entry.pending
     return entry
@@ -640,6 +670,11 @@ export class SessionManager {
     return rt
   }
 
+  private retireSpawnKey(id: string): void {
+    const generation = this.generations.get(id)
+    if (generation !== undefined) this.hooks.unregister(`${id}.${generation}`)
+  }
+
   private clearRuntime(id: string): void {
     const rt = this.runtime.get(id)
     if (!rt) return
@@ -651,10 +686,6 @@ export class SessionManager {
   }
 }
 
-/** True when the screen shows one of the CLI's selection dialogs (folder trust, login, theme, new-feature offers). */
-export function showsDialog(screen: string): boolean {
-  return /Enter to confirm|trust this folder|Do you trust/i.test(screen)
-}
 
 /** Sessions saved before workspaces had one branch/PR for their own folder. */
 function migrateSession(raw: Session): Session {
@@ -664,5 +695,9 @@ function migrateSession(raw: Session): Session {
   }
   delete old.branch
   delete old.pr
+  if (old.claudeSessionId && !isClaudeSessionId(old.claudeSessionId)) delete old.claudeSessionId
+  if (!Array.isArray(old.tagIds)) old.tagIds = []
+  if (!Array.isArray(old.autoTags)) old.autoTags = []
+  if (!Array.isArray(old.stepHistory)) old.stepHistory = []
   return old
 }

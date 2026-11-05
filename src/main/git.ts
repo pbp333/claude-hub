@@ -1,15 +1,30 @@
 import { existsSync, type Dirent } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import type { GitStatus, PrCondition, PrInfo } from '../shared/types'
-import { run } from './env'
+import { run as runCommand } from './env'
+
+/**
+ * Settings forced on every git (and gh, which runs git) call. A repo's own .git/config can
+ * name programs for git to run, e.g. core.fsmonitor on every `git status`; opening a folder
+ * from an archive must not run them. Command-line config (here via GIT_CONFIG_*) wins over
+ * the repo's. No optional locks also keeps background `git status` from fighting the
+ * user's own commits over index.lock.
+ */
+const SAFE_GIT_ENV: NodeJS.ProcessEnv = {
+  GIT_OPTIONAL_LOCKS: '0',
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'core.fsmonitor',
+  GIT_CONFIG_VALUE_0: 'false',
+  GIT_CONFIG_KEY_1: 'protocol.ext.allow',
+  GIT_CONFIG_VALUE_1: 'never'
+}
+
+function run(command: 'git' | 'gh', args: string[], cwd: string, timeout?: number) {
+  return runCommand(command, args, cwd, timeout, SAFE_GIT_ENV)
+}
 
 export async function currentBranch(cwd: string): Promise<string | undefined> {
   const r = await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], cwd, 5000)
-  return r.ok ? r.stdout.trim() || undefined : undefined
-}
-
-export async function repoRoot(cwd: string): Promise<string | undefined> {
-  const r = await run('git', ['rev-parse', '--show-toplevel'], cwd, 5000)
   return r.ok ? r.stdout.trim() || undefined : undefined
 }
 
@@ -25,7 +40,7 @@ const repoCache = new Map<string, { repos: string[]; at: number }>()
 
 /**
  * Git repos in a workspace: the workspace itself if it is one, otherwise repos up to two
- * levels down (~/apps/recipe-app, ~/apps/clients/acme). Cached briefly; paths use forward slashes.
+ * levels down (~/code/web-app, ~/code/clients/api). Cached briefly; paths use forward slashes.
  */
 export async function findRepos(workspace: string, maxAgeMs = 10000): Promise<string[]> {
   const root = toPosix(workspace).replace(/\/$/, '')
@@ -73,7 +88,7 @@ async function repoStatus(root: string, status: GitStatus): Promise<void> {
     if (entry.length < 4) continue
     const code = entry.slice(0, 2)
     const rel = entry.slice(3)
-    if (code[0] === 'R') i++ // rename: the next part is the old path
+    if (code[0] === 'R' || code[0] === 'C') i++ // rename or copy: the next part is the old path
     status[`${root}/${rel}`] =
       code === '??' ? '?' : code.includes('A') ? 'A' : code.includes('D') ? 'D' : code.includes('R') ? 'R' : code.includes('U') ? 'U' : 'M'
   }
@@ -99,11 +114,10 @@ export async function gitStatus(workspace: string): Promise<GitStatus> {
 
 /** File content at HEAD, for the diff view. Empty string for new files. */
 export async function headContent(path: string): Promise<string> {
-  const dir = path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
-  const root = await repoRoot(dir)
-  if (!root) return ''
-  const rel = path.replace(/\\/g, '/').slice(root.replace(/\\/g, '/').length + 1)
-  const r = await run('git', ['show', `HEAD:${rel}`], root, 10000)
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  // "HEAD:./name" is relative to the cwd, so symlinked or differently-cased paths to the
+  // repo still find the file (slicing off `git rev-parse --show-toplevel` did not).
+  const r = await run('git', ['show', `HEAD:./${path.slice(cut + 1)}`], path.slice(0, cut) || '/', 10000)
   return r.ok ? r.stdout : ''
 }
 
@@ -167,7 +181,12 @@ export async function fetchPr(cwd: string, botLogins: string[]): Promise<{ pr?: 
     if (/no pull requests found/i.test(r.stderr)) return {}
     return { error: r.stderr.trim() || 'gh failed' }
   }
-  const data = JSON.parse(r.stdout) as GhPr
+  let data: GhPr
+  try {
+    data = JSON.parse(r.stdout) as GhPr
+  } catch {
+    return { error: 'gh returned unexpected output' }
+  }
   return {
     pr: {
       number: data.number,

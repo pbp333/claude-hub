@@ -1,6 +1,7 @@
 import type { IDockviewPanelProps } from 'dockview-react'
 import { useEffect, useRef, useState } from 'react'
 import { acquireModel, hasConflict, isDirty, onModelsChanged, releaseModel, reloadModel, saveModel } from '../models'
+import { errorMessage } from '../errors'
 import { monaco } from '../monaco'
 import { fileName, onRevealRequest, openFile } from '../workspace'
 
@@ -51,7 +52,7 @@ export function EditorPanel({ params, api }: IDockviewPanelProps<Params>) {
         const active = api.onDidActiveChange(({ isActive }) => isActive && editor?.focus())
         disposers.push(() => active.dispose())
       })
-      .catch((err: Error) => setError(err.message))
+      .catch((err) => setError(errorMessage(err)))
     return () => {
       disposed = true
       for (const d of disposers) d()
@@ -106,13 +107,13 @@ export function DiffPanel({ params }: IDockviewPanelProps<Params>) {
         diff.getModifiedEditor().addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void saveModel(params.path))
         // HEAD moves when Claude commits; refresh the left side on file changes.
         stopListening = window.hub.onFsChanged(async (paths) => {
-          if (paths.includes(params.path) || paths.some((p) => p.includes('.git'))) {
+          if (paths.includes(params.path) || paths.some((p) => /[\\/]\.git[\\/]/.test(p))) {
             const next = await window.hub.headContent(params.path)
             if (original && !original.isDisposed() && next !== original.getValue()) original.setValue(next)
           }
         })
       })
-      .catch((err: Error) => setError(err.message))
+      .catch((err) => setError(errorMessage(err)))
     return () => {
       disposed = true
       stopListening?.()

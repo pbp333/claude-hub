@@ -4,6 +4,7 @@ import { join } from 'node:path'
 /** JSON files in the app data folder, written atomically (temp file, then rename). */
 export class JsonStore {
   private timers = new Map<string, NodeJS.Timeout>()
+  private pending = new Map<string, () => unknown>()
 
   constructor(readonly dir: string) {
     mkdirSync(dir, { recursive: true })
@@ -29,6 +30,25 @@ export class JsonStore {
     }
   }
 
+  /**
+   * For app state (sessions, windows, layouts): a damaged file is moved aside as
+   * `<file>.corrupt` and the app starts from `fallback` instead of failing to launch.
+   */
+  readState<T>(file: string, fallback: T, isValid: (value: unknown) => boolean = () => true): T {
+    try {
+      const value = this.read<unknown>(file, fallback)
+      if (isValid(value)) return value as T
+    } catch {
+      // fall through to quarantine
+    }
+    try {
+      renameSync(this.path(file), this.path(`${file}.corrupt`))
+    } catch {
+      // nothing to move
+    }
+    return fallback
+  }
+
   write(file: string, data: unknown): void {
     const p = this.path(file)
     const tmp = `${p}.${process.pid}.tmp`
@@ -39,10 +59,12 @@ export class JsonStore {
   /** Coalesces frequent writes (session state changes) into one write per file. */
   writeSoon(file: string, getData: () => unknown, delayMs = 500): void {
     clearTimeout(this.timers.get(file))
+    this.pending.set(file, getData)
     this.timers.set(
       file,
       setTimeout(() => {
         this.timers.delete(file)
+        this.pending.delete(file)
         this.write(file, getData())
       }, delayMs)
     )
@@ -51,6 +73,12 @@ export class JsonStore {
   flush(file: string, getData: () => unknown): void {
     clearTimeout(this.timers.get(file))
     this.timers.delete(file)
+    this.pending.delete(file)
     this.write(file, getData())
+  }
+
+  /** Writes everything still waiting in writeSoon (on quit). */
+  flushAll(): void {
+    for (const [file, getData] of [...this.pending]) this.flush(file, getData)
   }
 }

@@ -1,9 +1,10 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { AttentionState } from '../shared/types'
 
 export interface HookEvent {
+  /** The spawn key from the X-Hub-Session header: "<session id>.<generation>". */
   hubSessionId: string
   name: string
   payload: Record<string, unknown>
@@ -21,45 +22,88 @@ const EVENTS = [
   'SessionEnd'
 ]
 
+const MAX_BODY = 1024 * 1024
+
 /**
  * Local HTTP server that receives Claude Code `http` hooks from every session the app
- * started. Bound to 127.0.0.1 on a random port and protected by a per-launch token.
+ * started. Bound to 127.0.0.1 on a random port. Each running process gets its own
+ * random token, so a process inside one session can't post events for another.
  */
 export class HookServer {
-  readonly token = randomBytes(24).toString('hex')
   private server?: Server
   port = 0
   private onEvent: (event: HookEvent) => void
+  /** Spawn key (see SessionManager) → that process's token. */
+  private tokens = new Map<string, Buffer>()
 
   constructor(onEvent: (event: HookEvent) => void) {
     this.onEvent = onEvent
   }
 
+  /** A fresh token for one process; it is passed to that process only, in its environment. */
+  register(key: string): string {
+    const token = randomBytes(24).toString('hex')
+    this.tokens.set(key, Buffer.from(token))
+    return token
+  }
+
+  unregister(key: string): void {
+    this.tokens.delete(key)
+  }
+
+  private authorized(key: string, token: string): boolean {
+    const expected = this.tokens.get(key)
+    const given = Buffer.from(token)
+    return !!expected && expected.length === given.length && timingSafeEqual(expected, given)
+  }
+
   async start(): Promise<void> {
     this.server = createServer((req, res) => {
-      if (req.method !== 'POST' || req.url !== '/hook' || req.headers['x-hub-token'] !== this.token) {
+      const key = String(req.headers['x-hub-session'] || '')
+      const token = String(req.headers['x-hub-token'] || '')
+      // The Host check is defense in depth against DNS rebinding: a page on another name
+      // that resolves to 127.0.0.1 would send its own Host.
+      if (
+        req.method !== 'POST' ||
+        req.url !== '/hook' ||
+        req.headers.host !== `127.0.0.1:${this.port}` ||
+        !this.authorized(key, token)
+      ) {
         res.writeHead(403).end()
         return
       }
+      req.setEncoding('utf8')
       let body = ''
-      req.on('data', (chunk) => {
+      let tooLarge = false
+      req.on('data', (chunk: string) => {
+        if (tooLarge) return
         body += chunk
-        if (body.length > 1024 * 1024) req.destroy()
+        if (Buffer.byteLength(body) > MAX_BODY) {
+          tooLarge = true
+          res.writeHead(413).end()
+        }
       })
       req.on('end', () => {
+        if (tooLarge) return
         // Answer immediately with an empty decision so Claude never waits on the app.
         res.writeHead(200, { 'content-type': 'application/json' }).end('{}')
-        const hubSessionId = String(req.headers['x-hub-session'] || '')
         try {
           const payload = JSON.parse(body) as Record<string, unknown>
           const name = String(payload.hook_event_name || '')
-          if (hubSessionId && name) this.onEvent({ hubSessionId, name, payload })
+          if (name) this.onEvent({ hubSessionId: key, name, payload })
         } catch {
           // ignore malformed bodies
         }
       })
     })
-    await new Promise<void>((resolve) => this.server!.listen(0, '127.0.0.1', resolve))
+    await new Promise<void>((resolve, reject) => {
+      this.server!.once('error', reject)
+      this.server!.listen(0, '127.0.0.1', () => {
+        this.server!.off('error', reject)
+        resolve()
+      })
+    })
+    this.server.on('error', () => undefined)
     this.port = (this.server.address() as AddressInfo).port
   }
 
@@ -114,4 +158,24 @@ export function stateForEvent(event: HookEvent): AttentionState | undefined {
 /** States that ask for the user's attention and should notify. */
 export function shouldNotify(state: AttentionState): boolean {
   return state === 'needs-you' || state === 'done'
+}
+
+/**
+ * True when the screen shows one of the CLI's selection dialogs (folder trust, login, theme,
+ * new-feature offers). Only the bottom of the screen counts, where the dialog's
+ * "Enter to confirm · Esc to cancel" footer sits, so Claude's own output quoting those
+ * words higher up doesn't hold a prompt back.
+ */
+export function showsDialog(screen: string): boolean {
+  const bottom = screen
+    .split('\n')
+    .filter((l) => l.trim())
+    .slice(-4)
+    .join('\n')
+  return /Enter to confirm|Esc to cancel/i.test(bottom)
+}
+
+/** Claude Code session ids are UUIDs. */
+export function isClaudeSessionId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 }

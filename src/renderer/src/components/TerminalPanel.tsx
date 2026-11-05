@@ -1,7 +1,7 @@
 import type { IDockviewPanelProps } from 'dockview-react'
 import { useEffect, useRef } from 'react'
 import { useSession } from '../store'
-import { fitTerminal, getTerminal } from '../terminals'
+import { attachTerminal, fitTerminal } from '../terminals'
 
 export function TerminalPanel({ params, api }: IDockviewPanelProps<{ sessionId: string }>) {
   const ref = useRef<HTMLDivElement>(null)
@@ -9,8 +9,7 @@ export function TerminalPanel({ params, api }: IDockviewPanelProps<{ sessionId: 
 
   useEffect(() => {
     const container = ref.current!
-    const entry = getTerminal(params.sessionId)
-    container.appendChild(entry.element)
+    const entry = attachTerminal(params.sessionId, container)
     const observer = new ResizeObserver(() => fitTerminal(params.sessionId))
     observer.observe(container)
     const focus = api.onDidActiveChange(({ isActive }) => {

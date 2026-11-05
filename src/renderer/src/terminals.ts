@@ -12,6 +12,8 @@ interface Entry {
   /** Stays attached to the terminal; moved between panel containers as tabs move. */
   element: HTMLDivElement
   live: boolean
+  /** Loaded on first attach (see attachTerminal); undefined = not yet, null = unavailable. */
+  webgl?: WebglAddon | null
   /** True while old output is being replayed; xterm's automatic replies to it must not reach the process. */
   replaying: boolean
 }
@@ -44,13 +46,6 @@ export function getTerminal(sessionId: string): Entry {
   const element = document.createElement('div')
   element.className = 'terminal-host'
   term.open(element)
-  try {
-    const webgl = new WebglAddon()
-    webgl.onContextLoss(() => webgl.dispose())
-    term.loadAddon(webgl)
-  } catch {
-    // falls back to the DOM renderer
-  }
   term.onData((data) => {
     // Replayed output contains the CLI's old terminal queries; answering them now would send
     // stray escape sequences (read as an Esc key press) into whatever the CLI is showing.
@@ -71,6 +66,47 @@ export function getTerminal(sessionId: string): Entry {
   })
   return entry
 }
+
+/**
+ * Puts the session's terminal in a panel. With `terminalWebgl` on, the WebGL renderer is
+ * loaded only now, once the element is on the page, so it measures real cells.
+ */
+export function attachTerminal(sessionId: string, container: HTMLElement): Entry {
+  const entry = getTerminal(sessionId)
+  container.appendChild(entry.element)
+  if (entry.webgl === undefined && !useUi.getState().hub?.settings.terminalWebgl) entry.webgl = null
+  if (entry.webgl === undefined) {
+    requestAnimationFrame(() => {
+      if (entry.webgl !== undefined || !entry.element.isConnected) return
+      try {
+        const webgl = new WebglAddon()
+        webgl.onContextLoss(() => {
+          webgl.dispose()
+          entry.webgl = null
+        })
+        entry.term.loadAddon(webgl)
+        entry.webgl = webgl
+      } catch {
+        entry.webgl = null // DOM renderer
+      }
+    })
+  }
+  return entry
+}
+
+// Moving the window to a display with another pixel ratio leaves WebGL's glyphs blurry or
+// mis-sized; rebuild them.
+function watchPixelRatio(): void {
+  matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+    'change',
+    () => {
+      for (const entry of terminals.values()) entry.webgl?.clearTextureAtlas()
+      watchPixelRatio()
+    },
+    { once: true }
+  )
+}
+watchPixelRatio()
 
 export function disposeTerminal(sessionId: string): void {
   terminals.get(sessionId)?.term.dispose()

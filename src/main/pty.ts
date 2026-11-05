@@ -10,7 +10,7 @@ const MAX_BUFFER = 512 * 1024
  */
 export class PtyManager {
   private procs = new Map<string, pty.IPty>()
-  private buffers = new Map<string, string>()
+  private buffers = new Map<string, { chunks: string[]; size: number; trimmed: boolean }>()
   private screens = new Map<string, Terminal>()
 
   constructor(
@@ -19,7 +19,8 @@ export class PtyManager {
   ) {}
 
   /** Throws when the process can't be started. */
-  spawn(id: string, file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): void {
+  /** `args` as one string is passed to Windows as a raw command line (see cmdShimCommandLine). */
+  spawn(id: string, file: string, args: string[] | string, cwd: string, env: NodeJS.ProcessEnv): void {
     this.stop(id)
     const proc = pty.spawn(file, args, {
       name: 'xterm-256color',
@@ -42,9 +43,15 @@ export class PtyManager {
 
   /** Output from the process, or a message from the app, shown in the session's terminal. */
   print(id: string, data: string): void {
-    let buffer = (this.buffers.get(id) ?? '') + data
-    if (buffer.length > MAX_BUFFER) buffer = buffer.slice(-MAX_BUFFER)
-    this.buffers.set(id, buffer)
+    let buf = this.buffers.get(id)
+    if (!buf) this.buffers.set(id, (buf = { chunks: [], size: 0, trimmed: false }))
+    buf.chunks.push(data)
+    buf.size += data.length
+    // Drop whole chunks from the front; buffer() then starts the replay at a line break.
+    while (buf.size > MAX_BUFFER && buf.chunks.length > 1) {
+      buf.size -= buf.chunks.shift()!.length
+      buf.trimmed = true
+    }
     this.screens.get(id)?.write(data)
     this.onData(id, data)
   }
@@ -63,8 +70,18 @@ export class PtyManager {
     return this.procs.has(id)
   }
 
+  /**
+   * Recent output for replay. When older output was dropped, it starts after the first line
+   * break, so the replay doesn't begin in the middle of an escape sequence.
+   */
   buffer(id: string): string {
-    return this.buffers.get(id) ?? ''
+    const buf = this.buffers.get(id)
+    if (!buf) return ''
+    const text = buf.chunks.join('')
+    buf.chunks = [text]
+    if (!buf.trimmed) return text
+    const nl = text.indexOf('\n')
+    return nl >= 0 ? text.slice(nl + 1) : text
   }
 
   write(id: string, data: string): void {

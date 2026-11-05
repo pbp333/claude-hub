@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from 'node:fs'
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { DirEntry } from '../shared/types'
 
 const HIDDEN = new Set(['.git', 'node_modules', '.DS_Store'])
@@ -37,7 +38,7 @@ export async function resolveLinks(cwd: string, candidates: string[]): Promise<R
   await Promise.all(
     candidates.map(async (text) => {
       const clean = text.replace(/^["'(]+|["'),.;:]+$/g, '')
-      const path = isAbsolute(clean) ? clean : resolve(cwd, clean.replace(/^~(?=[/\\])/, process.env.HOME ?? '~'))
+      const path = isAbsolute(clean) ? clean : resolve(cwd, clean.replace(/^~(?=[/\\])/, homedir()))
       try {
         if ((await stat(path)).isFile()) found.push({ text, path })
       } catch {
@@ -50,7 +51,36 @@ export async function resolveLinks(cwd: string, candidates: string[]): Promise<R
 
 export function isInside(root: string, path: string): boolean {
   const rel = relative(root, path)
-  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
+  return !rel || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+/**
+ * The real path of `path` if it lies inside one of `roots` (after resolving symlinks, so a
+ * link inside a workspace can't reach outside it), else undefined. A file that doesn't exist
+ * yet is checked by its folder.
+ */
+export async function resolveInside(path: string, roots: string[]): Promise<string | undefined> {
+  if (typeof path !== 'string' || !isAbsolute(path)) return undefined
+  let real: string
+  try {
+    real = await realpath(path)
+  } catch {
+    try {
+      real = join(await realpath(dirname(path)), basename(path))
+    } catch {
+      return undefined
+    }
+  }
+  for (const root of roots) {
+    let realRoot: string
+    try {
+      realRoot = await realpath(root)
+    } catch {
+      continue
+    }
+    if (isInside(realRoot, real)) return real
+  }
+  return undefined
 }
 
 const IGNORED_SEGMENT = /(^|[\\/])(node_modules|build|dist|out|target|\.gradle|Pods|\.expo|\.next|\.venv|DerivedData|\.cache)([\\/]|$)/
@@ -65,8 +95,12 @@ export class FolderWatcher {
   private watchers = new Map<string, FSWatcher>()
   private pending = new Set<string>()
   private timer?: NodeJS.Timeout
+  private firstPendingAt = 0
+  private onChange: (paths: string[]) => void
 
-  constructor(private onChange: (paths: string[]) => void) {}
+  constructor(onChange: (paths: string[]) => void) {
+    this.onChange = onChange
+  }
 
   setFolders(folders: string[]): void {
     const wanted = new Set(folders)
@@ -96,13 +130,17 @@ export class FolderWatcher {
   }
 
   private queue(path: string): void {
+    if (!this.pending.size) this.firstPendingAt = Date.now()
     this.pending.add(path)
     clearTimeout(this.timer)
+    // Wait for a quiet 200 ms, but never more than 1 s: a file written constantly (a log)
+    // would otherwise hold every update back forever.
+    const wait = Math.max(0, Math.min(200, this.firstPendingAt + 1000 - Date.now()))
     this.timer = setTimeout(() => {
       const paths = [...this.pending]
       this.pending.clear()
       this.onChange(paths)
-    }, 200)
+    }, wait)
   }
 
   close(): void {

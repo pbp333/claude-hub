@@ -1,44 +1,55 @@
 {
   "name": "claude-hub",
+  "productName": "Claude Hub",
   "version": "0.1.0",
   "description": "Desktop hub for running several Claude Code CLI sessions at once",
+  "license": "MIT",
+  "author": "pbp333",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pbp333/claude-hub.git"
+  },
+  "homepage": "https://github.com/pbp333/claude-hub#readme",
+  "bugs": {
+    "url": "https://github.com/pbp333/claude-hub/issues"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "node --test test/*.test.ts",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "postinstall": "node node_modules/electron/install.js && node scripts/fix-node-pty.js"
   },
-  "author": "pbp333",
-  "license": "UNLICENSED",
   "dependencies": {
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/addon-web-links": "^0.12.0",
-    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/headless": "^6.0.0",
-    "@xterm/xterm": "^6.0.0",
-    "dockview-react": "^8.8.3",
-    "monaco-editor": "^0.57.0",
-    "node-pty": "^1.1.0",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "zustand": "^5.0.16"
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
-    "@types/node": "^26.6.6",
+    "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "dockview-react": "^8.8.3",
     "electron": "^45.2.1",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
+    "monaco-editor": "^0.57.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
-  },
-  "productName": "Claude Hub",
-  "private": true
+    "vite": "^8.3.5",
+    "zustand": "^5.0.16"
+  }
 }

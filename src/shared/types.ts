@@ -133,8 +133,9 @@ export interface Keybindings {
 }
 
 export interface Settings {
-  /** Shell for plain terminals and, on Windows, for launching claude. Empty = system default. */
+  /** Shell for plain-shell sessions. Empty = $SHELL on macOS, PowerShell on Windows. */
   shell: string
+  /** "claude" (looked up on PATH) or a full path to the executable. */
   claudeCommand: string
   claudeArgs: string[]
   hooksEnabled: boolean
@@ -144,6 +145,12 @@ export interface Settings {
   restoreOnLaunch: boolean
   terminalFont: string
   terminalFontSize: number
+  /**
+   * GPU (WebGL) terminal rendering. Off by default: on some GPU/display setups (seen on an
+   * Intel Mac with an external display) it draws tiny, widely spaced glyphs. The DOM
+   * renderer is always correct and fast enough for Claude's UI.
+   */
+  terminalWebgl: boolean
   keybindings: Keybindings
 }
 

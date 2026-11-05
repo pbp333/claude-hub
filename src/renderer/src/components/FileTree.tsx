@@ -20,11 +20,17 @@ export function FileTree() {
     refresh()
     if (!root) return
     let timer: ReturnType<typeof setTimeout> | undefined
+    let last = 0
     const stop = window.hub.onFsChanged((paths) => {
       if (!paths.some((p) => p.startsWith(root))) return
-      // Git markers follow commits and checkouts (.git/index, .git/HEAD) too.
-      clearTimeout(timer)
-      timer = setTimeout(refresh, 300)
+      // Git markers follow commits and checkouts (.git/index, .git/HEAD) too. At most one
+      // refresh a second: each one re-runs git status in every repo of the workspace.
+      if (timer) return
+      timer = setTimeout(() => {
+        timer = undefined
+        last = Date.now()
+        refresh()
+      }, Math.max(300, last + 1000 - Date.now()))
     })
     return () => {
       clearTimeout(timer)

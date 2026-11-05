@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: Settings = {
   restoreOnLaunch: true,
   terminalFont: process.platform === 'win32' ? 'Cascadia Mono, Consolas, monospace' : 'Menlo, monospace',
   terminalFontSize: 13,
+  terminalWebgl: false,
   keybindings: {
     newWindow: 'CmdOrCtrl+Shift+N',
     openFolder: 'CmdOrCtrl+O',
@@ -122,18 +123,61 @@ export function loadConfig(store: JsonStore): LoadedConfig {
   const rawSettings = load<Partial<Settings>>('settings.json', DEFAULT_SETTINGS, (v) =>
     isObject(v) ? [] : ['must be a JSON object']
   )
-  const keybindings = { ...(rawSettings.keybindings ?? {}) }
-  // Next step used to default to ⌘⇧N, which is now New Window.
-  if (keybindings.nextStep === 'CmdOrCtrl+Shift+N' && !keybindings.newWindow) delete keybindings.nextStep
-  const settings: Settings = {
-    ...DEFAULT_SETTINGS,
-    ...rawSettings,
-    keybindings: { ...DEFAULT_SETTINGS.keybindings, ...keybindings }
-  }
+  const { settings, problems } = sanitizeSettings(rawSettings)
+  for (const message of problems) errors.push({ file: 'settings.json', message })
   const tags = load('tags.json', DEFAULT_TAGS, validateTags)
   const rules = load('rules.json', DEFAULT_RULES, validateRules)
   const jobTypes = load('jobTypes.json', DEFAULT_JOB_TYPES, validateJobTypes)
   return { settings, tags, rules, jobTypes, errors }
+}
+
+export const MIN_POLL_INTERVAL_SEC = 15
+
+/**
+ * Checks each setting's type and keeps the default for any that is wrong, so one typo
+ * (say "claudeArgs": "--verbose") can't break spawning or GitHub polling.
+ */
+export function sanitizeSettings(raw: Partial<Settings>): { settings: Settings; problems: string[] } {
+  const problems: string[] = []
+  const settings: Settings = { ...DEFAULT_SETTINGS, keybindings: { ...DEFAULT_SETTINGS.keybindings } }
+  const r = raw as Record<string, unknown>
+  const take = <K extends keyof Settings>(key: K, ok: (v: unknown) => boolean, expected: string) => {
+    if (r[key] === undefined) return
+    if (ok(r[key])) settings[key] = r[key] as Settings[K]
+    else problems.push(`"${key}" must be ${expected}; using the default`)
+  }
+  const isString = (v: unknown) => typeof v === 'string'
+  const isStringList = (v: unknown) => Array.isArray(v) && v.every(isString)
+  const isBool = (v: unknown) => typeof v === 'boolean'
+  take('shell', isString, 'text')
+  take('claudeCommand', isNonEmptyString, 'a command name or full path')
+  take('claudeArgs', isStringList, 'a list of text arguments, e.g. ["--model", "opus"]')
+  take('hooksEnabled', isBool, 'true or false')
+  take('pollIntervalSec', (v) => typeof v === 'number' && Number.isFinite(v), 'a number of seconds')
+  if (settings.pollIntervalSec < MIN_POLL_INTERVAL_SEC) {
+    problems.push(`"pollIntervalSec" is at least ${MIN_POLL_INTERVAL_SEC}`)
+    settings.pollIntervalSec = MIN_POLL_INTERVAL_SEC
+  }
+  take('botLogins', isStringList, 'a list of GitHub logins')
+  take('notifications', isBool, 'true or false')
+  take('restoreOnLaunch', isBool, 'true or false')
+  take('terminalFont', isNonEmptyString, 'a font name')
+  take('terminalFontSize', (v) => typeof v === 'number' && v >= 6 && v <= 72, 'a number from 6 to 72')
+  take('terminalWebgl', isBool, 'true or false')
+  if (r.keybindings !== undefined) {
+    if (!isObject(r.keybindings)) problems.push('"keybindings" must be an object; using the defaults')
+    else {
+      const kb = { ...r.keybindings }
+      // Next step used to default to ⌘⇧N, which is now New Window.
+      if (kb.nextStep === 'CmdOrCtrl+Shift+N' && !kb.newWindow) delete kb.nextStep
+      for (const [name, value] of Object.entries(kb)) {
+        if (!(name in settings.keybindings)) problems.push(`unknown keybinding "${name}"`)
+        else if (!isNonEmptyString(value)) problems.push(`keybinding "${name}" must be text like "CmdOrCtrl+T"`)
+        else settings.keybindings[name as keyof Settings['keybindings']] = value
+      }
+    }
+  }
+  return { settings, problems }
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

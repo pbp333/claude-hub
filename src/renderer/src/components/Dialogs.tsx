@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionKind } from '../../../shared/types'
+import { errorMessage } from '../errors'
 import { getSession, useProject, useSession, useUi } from '../store'
 import { closeActivePanel, openFile, openSession } from '../workspace'
 
@@ -50,8 +51,7 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
     try {
       id = await window.hub.createSession({ projectId: project.id, name, kind, jobTypeId: jobTypeId || undefined })
     } catch (err) {
-      // Electron prefixes errors thrown in the main process; show only the message.
-      setError((err as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''))
+      setError(errorMessage(err))
       setBusy(false)
       return
     }
