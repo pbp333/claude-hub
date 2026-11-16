@@ -184,6 +184,7 @@ export function commandItems(): PaletteItem[] {
   const items: PaletteItem[] = [
     { label: 'New session', run: () => ui.openDialog({ type: 'newSession' }) },
     { label: 'Open folder…', run: () => window.hub.openFolder() },
+    { label: 'Show history', detail: 'past Claude conversations', run: () => ui.setSidebarTab('history') },
     { label: 'New window', run: () => window.hub.newWindow() },
     { label: 'Go to next session that needs me', run: () => goToNextNeedsYou() },
     { label: 'Toggle file tree', run: () => ui.toggleFileTree() },
@@ -209,7 +210,7 @@ export function commandItems(): PaletteItem[] {
     for (const tag of ui.hub?.tags ?? [])
       items.push({ label: `Toggle tag: ${tag.name}`, detail: session.name, run: () => window.hub.toggleTag(session.id, tag.id) })
   }
-  for (const s of (ui.hub?.sessions ?? []).filter((x) => x.projectId === ui.projectId))
+  for (const s of (ui.hub?.sessions ?? []).filter((x) => x.projectId === ui.projectId && !x.archived))
     items.push({ label: `Go to session: ${s.name}`, run: () => openSession(s.id) })
   return items
 }

@@ -99,7 +99,13 @@ export interface Session {
   kind: SessionKind
   cwd: string
   repos: SessionRepo[]
+  /** Claude's id for the conversation now running (changes on /clear); used for --resume. */
   claudeSessionId?: string
+  /** Every Claude conversation this session has had, oldest first, for the History tab. */
+  claudeSessionIds: string[]
+  /** Closed sessions are kept (archived) so History still shows their job, steps and tags. */
+  archived?: boolean
+  closedAt?: string
   attentionState: AttentionState
   /** Set when the state changed while the session wasn't focused; cleared on focus. */
   unread: boolean
@@ -129,6 +135,7 @@ export interface Keybindings {
   quickOpen: string
   commandPalette: string
   toggleFileTree: string
+  showHistory: string
   closeTab: string
 }
 
@@ -177,6 +184,54 @@ export interface NewSessionOptions {
   name?: string
   kind: SessionKind
   jobTypeId?: string
+  /** Continue this Claude conversation (from History) instead of starting a new one. */
+  resumeClaudeSessionId?: string
+  /**
+   * Folder to run in, inside the workspace; defaults to the workspace. Set only by the main
+   * process (resuming a conversation that was started in a subfolder), never from the UI.
+   */
+  cwd?: string
+}
+
+/** One Claude conversation from the workspace's transcripts. */
+export interface HistoryItem {
+  claudeSessionId: string
+  title: string
+  firstPrompt?: string
+  startedAt: string
+  endedAt: string
+  /** Prompts plus replies. */
+  messages: number
+  /** Time spent in the conversation: gaps over 30 minutes between messages don't count. */
+  activeMs: number
+  branch?: string
+  cwd: string
+  sizeBytes: number
+}
+
+export type TranscriptEntry =
+  | { kind: 'user' | 'assistant' | 'command'; text: string; at: string }
+  | {
+      kind: 'tool'
+      name: string
+      summary: string
+      /** Tool input as pretty JSON, clipped. */
+      input: string
+      result?: string
+      isError?: boolean
+      /** Set when the tool ran a subagent; its own transcript can be loaded on demand. */
+      agentId?: string
+      at: string
+    }
+
+export interface Transcript {
+  claudeSessionId: string
+  title: string
+  startedAt?: string
+  branch?: string
+  entries: TranscriptEntry[]
+  /** Only the latest part of a very long conversation is included. */
+  truncated: boolean
 }
 
 export interface DirEntry {
@@ -200,6 +255,8 @@ export type UiCommand =
   | { type: 'quickOpen' }
   | { type: 'commandPalette' }
   | { type: 'toggleFileTree' }
+  | { type: 'showHistory' }
+  | { type: 'openTranscript'; claudeSessionId: string; title: string }
   | { type: 'closeTab' }
   | { type: 'focusSession'; sessionId: string }
   | { type: 'switchSession'; index: number }

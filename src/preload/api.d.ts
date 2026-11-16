@@ -1,4 +1,4 @@
-import type { DirEntry, GitStatus, HubState, NewSessionOptions, UiCommand, WindowInfo } from '../shared/types'
+import type { DirEntry, GitStatus, HistoryItem, HubState, NewSessionOptions, Transcript, TranscriptEntry, UiCommand, WindowInfo } from '../shared/types'
 
 export interface HubApi {
   getState(): Promise<HubState>
@@ -32,6 +32,12 @@ export interface HubApi {
   resolveLinks(cwd: string, candidates: string[]): Promise<{ text: string; path: string }[]>
   onFsChanged(cb: (paths: string[]) => void): () => void
   configPath(file: string): Promise<string | undefined>
+  /** Claude conversations recorded for the workspace, newest first. */
+  listHistory(projectId: string): Promise<HistoryItem[]>
+  readTranscript(projectId: string, claudeSessionId: string): Promise<Transcript | undefined>
+  readSubagent(projectId: string, claudeSessionId: string, agentId: string): Promise<TranscriptEntry[] | undefined>
+  /** Continues a conversation in a hub session; returns that session's id. */
+  resumeHistory(projectId: string, claudeSessionId: string, title?: string): Promise<string>
   loadLayout(projectId: string): Promise<unknown>
   saveLayout(projectId: string, layout: unknown): void
   openExternal(url: string): void

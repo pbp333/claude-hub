@@ -12,6 +12,8 @@ interface UiState {
   dialog?: Dialog
   /** Session order as shown in the sidebar, for ⌘1…9 and "next that needs me". */
   sidebarOrder: string[]
+  sidebarTab: 'sessions' | 'history'
+  setSidebarTab(tab: 'sessions' | 'history'): void
   setHub(hub: HubState): void
   setProject(projectId: string | undefined): void
   setActiveSession(id: string | undefined): void
@@ -23,6 +25,8 @@ interface UiState {
 export const useUi = create<UiState>((set) => ({
   fileTreeVisible: true,
   sidebarOrder: [],
+  sidebarTab: 'sessions',
+  setSidebarTab: (sidebarTab) => set({ sidebarTab }),
   setHub: (hub) => set({ hub }),
   setProject: (projectId) => set({ projectId, activeSessionId: undefined, dialog: undefined }),
   setActiveSession: (id) => {

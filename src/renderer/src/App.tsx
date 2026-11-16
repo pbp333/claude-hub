@@ -6,6 +6,7 @@ import { DiffPanel, EditorPanel } from './components/EditorPanel'
 import { FileTree } from './components/FileTree'
 import { Sidebar } from './components/Sidebar'
 import { TerminalPanel } from './components/TerminalPanel'
+import { TranscriptPanel } from './components/TranscriptPanel'
 import { Welcome } from './components/Welcome'
 import { getSession, useProject, useUi } from './store'
 import { disposeTerminal } from './terminals'
@@ -15,6 +16,7 @@ import {
   closeSessionPanel,
   openFile,
   openSession,
+  openTranscript,
   retryPendingSession,
   saveLayout,
   setWorkspaceApi
@@ -23,7 +25,8 @@ import {
 const components: Record<string, React.FunctionComponent<IDockviewPanelProps>> = {
   terminal: TerminalPanel as React.FunctionComponent<IDockviewPanelProps>,
   editor: EditorPanel as React.FunctionComponent<IDockviewPanelProps>,
-  diff: DiffPanel as React.FunctionComponent<IDockviewPanelProps>
+  diff: DiffPanel as React.FunctionComponent<IDockviewPanelProps>,
+  transcript: TranscriptPanel as React.FunctionComponent<IDockviewPanelProps>
 }
 
 function Watermark() {
@@ -49,7 +52,8 @@ async function onReady(event: DockviewReadyEvent, projectId: string): Promise<vo
     // Drop tabs for sessions that no longer exist or belong to another workspace.
     for (const panel of [...api.panels]) {
       const sessionId = panel.id.startsWith('session:') ? panel.id.slice(8) : undefined
-      if (sessionId && getSession(sessionId)?.projectId !== projectId) panel.api.close()
+      const s = sessionId ? getSession(sessionId) : undefined
+      if (sessionId && (s?.projectId !== projectId || s.archived)) panel.api.close()
     }
   }
   setWorkspaceApi(api)
@@ -77,6 +81,10 @@ function handleCommand(cmd: UiCommand): void {
       return ui.openDialog({ type: 'palette', mode: 'commands' })
     case 'toggleFileTree':
       return ui.toggleFileTree()
+    case 'showHistory':
+      return ui.setSidebarTab(ui.sidebarTab === 'history' ? 'sessions' : 'history')
+    case 'openTranscript':
+      return openTranscript(cmd.claudeSessionId, cmd.title)
     case 'closeTab':
       return closeActivePanel()
     case 'nextNeedsYou':
@@ -119,9 +127,11 @@ export function App() {
       const prev = useUi.getState().hub
       useUi.getState().setHub(state)
       retryPendingSession()
-      // Close tabs of sessions that were removed.
+      // Close tabs of sessions that were closed (archived) or removed.
       for (const s of prev?.sessions ?? []) {
-        if (!state.sessions.some((x) => x.id === s.id)) {
+        if (s.archived) continue
+        const now = state.sessions.find((x) => x.id === s.id)
+        if (!now || now.archived) {
           closeSessionPanel(s.id)
           disposeTerminal(s.id)
         }

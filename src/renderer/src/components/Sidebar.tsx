@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { currentStep, effectiveTags, needsAttention } from '../../../shared/tags'
 import type { AttentionState, HubState, Session } from '../../../shared/types'
 import { useProject, useUi } from '../store'
+import { HistoryList } from './History'
 import { openSession } from '../workspace'
 
 const STATE_LABEL: Record<AttentionState, string> = {
@@ -52,6 +53,8 @@ export function Sidebar() {
   const activeSessionId = useUi((s) => s.activeSessionId)
   const openDialog = useUi((s) => s.openDialog)
   const setSidebarOrder = useUi((s) => s.setSidebarOrder)
+  const tab = useUi((s) => s.sidebarTab)
+  const setTab = useUi((s) => s.setSidebarTab)
   const [filter, setFilter] = useState('')
   const [quick, setQuick] = useState<string>('all')
   const [groupBy, setGroupBy] = useState<GroupBy>(() => {
@@ -75,7 +78,7 @@ export function Sidebar() {
     if (!hub || !project) return []
     const text = filter.trim().toLowerCase()
     const visible = hub.sessions.filter((s) => {
-      if (s.projectId !== project.id) return false
+      if (s.projectId !== project.id || s.archived) return false
       const tags = effectiveTags(s, hub.tags)
       if (quick === 'needs-you' && !needsAttention(s)) return false
       if (quick.startsWith('tag:') && !tags.some((t) => t.tag.id === quick.slice(4))) return false
@@ -92,7 +95,7 @@ export function Sidebar() {
   }, [groups, setSidebarOrder])
 
   if (!hub || !project) return <aside className="sidebar" />
-  const mine = hub.sessions.filter((s) => s.projectId === project.id)
+  const mine = hub.sessions.filter((s) => s.projectId === project.id && !s.archived)
   const overlaps = repoOverlaps(mine)
   const tagGroups = [...new Set(hub.tags.map((t) => t.group).filter((g): g is string => !!g))]
   const usedTags = hub.tags.filter((t) => mine.some((s) => effectiveTags(s, hub.tags).some((e) => e.tag.id === t.id)))
@@ -108,6 +111,18 @@ export function Sidebar() {
           + New
         </button>
       </div>
+      <div className="sidebar-tabs" role="tablist">
+        <button role="tab" aria-selected={tab === 'sessions'} className={tab === 'sessions' ? 'on' : ''} onClick={() => setTab('sessions')}>
+          Sessions
+        </button>
+        <button role="tab" aria-selected={tab === 'history'} className={tab === 'history' ? 'on' : ''} onClick={() => setTab('history')}>
+          History
+        </button>
+      </div>
+      {tab === 'history' ? (
+        <HistoryList />
+      ) : (
+        <>
       <input
         className="sidebar-filter"
         placeholder="Filter sessions"
@@ -159,6 +174,8 @@ export function Sidebar() {
           </div>
         ))}
       </div>
+        </>
+      )}
       {hub.configErrors.length > 0 && (
         <div className="config-errors">
           <strong>Config problems</strong>

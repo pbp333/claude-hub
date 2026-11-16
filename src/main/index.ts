@@ -6,9 +6,11 @@ import { pathToFileURL } from 'node:url'
 import { effectiveTags } from '../shared/tags'
 import type { NewSessionOptions, Session, UiCommand, WindowInfo } from '../shared/types'
 import { CONFIG_FILES } from './config'
-import { loadLoginShellEnv } from './env'
+import { getEnv, loadLoginShellEnv } from './env'
 import { FolderWatcher, isInside, listDir, readText, resolveInside, resolveLinks, writeText } from './files'
 import { gitStatus, headContent, listFiles } from './git'
+import { claudeProjectsDir, listHistory, readSubagent, readTranscript } from './history'
+import { isClaudeSessionId } from './hooks'
 import { SessionManager } from './sessions'
 import { JsonStore } from './store'
 
@@ -334,6 +336,7 @@ function buildMenu(): void {
       submenu: [
         item('Command Palette…', kb.commandPalette, { type: 'commandPalette' }),
         item('Toggle File Tree', kb.toggleFileTree, { type: 'toggleFileTree' }),
+        item('History', kb.showHistory, { type: 'showHistory' }),
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },
@@ -553,6 +556,34 @@ function registerIpc(): void {
   })
   handle('config-path', (_e, file) => manager.configFilePath(str(file)))
 
+  // History: Claude's own transcripts for a workspace, read-only. Ids are checked so nothing
+  // but a transcript file of that workspace can be named.
+  const projectPath = (projectId: unknown) => {
+    const project = manager.project(str(projectId))
+    if (!project) throw new Error('not an open folder')
+    return project.path
+  }
+  const claudeId = (id: unknown) => {
+    const v = str(id)
+    if (!isClaudeSessionId(v)) throw new Error('not a conversation id')
+    return v
+  }
+  handle('list-history', (_e, projectId) => listHistory(claudeProjectsDir(getEnv()), projectPath(projectId)))
+  handle('read-transcript', (_e, projectId, id) =>
+    readTranscript(claudeProjectsDir(getEnv()), projectPath(projectId), claudeId(id))
+  )
+  handle('read-subagent', (_e, projectId, id, agentId) => {
+    const agent = str(agentId)
+    if (!/^[\w-]{1,64}$/.test(agent)) throw new Error('not an agent id')
+    return readSubagent(claudeProjectsDir(getEnv()), projectPath(projectId), claudeId(id), agent)
+  })
+  handle('resume-history', async (_e, projectId, id, title) => {
+    const conversation = claudeId(id)
+    const item = (await listHistory(claudeProjectsDir(getEnv()), projectPath(projectId))).find((i) => i.claudeSessionId === conversation)
+    if (!item) throw new Error('Conversation not found in this folder')
+    return manager.resumeFromHistory(str(projectId), conversation, title === undefined ? undefined : str(title, 300), item.cwd || undefined)
+  })
+
   // One layout per workspace, so each folder reopens with its own tabs and splits.
   const layoutFile = (projectId: unknown) => `layout-${str(projectId).replace(/[^\w-]/g, '')}.json`
   handle('load-layout', (_e, projectId) => store.readState<unknown>(layoutFile(projectId), null))
@@ -619,6 +650,20 @@ async function runDevAids(): Promise<void> {
     // CLAUDE_HUB_DEMO_OPEN="<path>:<line>" opens a file the way a terminal link click does.
     const open = env('CLAUDE_HUB_DEMO_OPEN')?.match(/^(.+):(\d+)$/)
     if (open) setTimeout(() => command({ type: 'openFile', path: open[1], line: Number(open[2]) }, hw), 4000)
+    // CLAUDE_HUB_DEMO_RESUME=<claude session id> resumes that conversation from History.
+    const resume = env('CLAUDE_HUB_DEMO_RESUME')
+    if (resume) {
+      const item = (await listHistory(claudeProjectsDir(getEnv()), manager.project(hw.projectId)!.path)).find((i) => i.claudeSessionId === resume)
+      const id = await manager.resumeFromHistory(hw.projectId!, resume, item?.title, item?.cwd)
+      setTimeout(() => command({ type: 'focusSession', sessionId: id }, hw), 2500)
+    }
+    // CLAUDE_HUB_DEMO_TRANSCRIPT=<claude session id> shows History and opens that conversation.
+    const transcript = env('CLAUDE_HUB_DEMO_TRANSCRIPT')
+    if (transcript)
+      setTimeout(() => {
+        command({ type: 'showHistory' }, hw)
+        command({ type: 'openTranscript', claudeSessionId: transcript, title: 'Conversation' }, hw)
+      }, 3000)
     // CLAUDE_HUB_DEMO_INPUT is typed into the session; it is a JSON string body ("\r" = Enter).
     const input = env('CLAUDE_HUB_DEMO_INPUT')
     if (input) {

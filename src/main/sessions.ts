@@ -15,6 +15,7 @@ import type {
 } from '../shared/types'
 import { CONFIG_FILES, loadConfig, type LoadedConfig } from './config'
 import { cmdShimCommandLine, getEnv, which } from './env'
+import { isInside } from './files'
 import { currentBranch, fetchPr, findRepos, repoFor, toPosix } from './git'
 import { HookServer, isClaudeSessionId, shouldNotify, showsDialog, stateForEvent, type HookEvent } from './hooks'
 import { PtyManager } from './pty'
@@ -35,6 +36,7 @@ const QUIET_MS = 5000
 const READY_QUIET_MS = 1500
 const READY_MAX_MS = 15000
 const PR_BACKOFF_MS = 5 * 60 * 1000
+const MAX_ARCHIVED = 300
 
 interface PrCacheEntry {
   pr?: PrInfo
@@ -90,7 +92,7 @@ export class SessionManager {
   async start(openProjectIds: string[]): Promise<void> {
     await this.hooks.start()
     this.store.write('hub-hooks.json', JSON.parse(this.hooks.settingsJson()))
-    const wasRunning = new Set(this.sessions.filter((s) => s.running).map((s) => s.id))
+    const wasRunning = new Set(this.sessions.filter((s) => s.running && !s.archived).map((s) => s.id))
     for (const s of this.sessions) {
       s.running = false
       s.attentionState = 'exited'
@@ -153,16 +155,18 @@ export class SessionManager {
     const project = this.project(opts.projectId)
     if (!project) throw new Error('No folder is open in this window')
     if (!existsSync(project.path)) throw new Error(`Folder not found: ${project.path}`)
+    const cwd = opts.cwd && isInside(project.path, opts.cwd) && existsSync(opts.cwd) ? opts.cwd : project.path
     const now = new Date().toISOString()
     const job = opts.jobTypeId ? this.config.jobTypes.find((j) => j.id === opts.jobTypeId) : undefined
-    const count = this.sessions.filter((s) => s.projectId === project.id).length
+    const count = this.sessions.filter((s) => s.projectId === project.id && !s.archived).length
     const session: Session = {
       id: randomUUID(),
       projectId: project.id,
       name: opts.name?.trim() || (count ? `${project.name} ${count + 1}` : project.name),
       kind: opts.kind,
-      cwd: project.path,
+      cwd,
       repos: [],
+      claudeSessionIds: [],
       attentionState: 'starting',
       unread: false,
       hookSeen: false,
@@ -178,9 +182,43 @@ export class SessionManager {
     // A workspace that is itself a repo is always the session's repo.
     const repos = await findRepos(project.path)
     if (repos.length === 1 && repos[0] === toPosix(project.path).replace(/\/$/, '')) await this.addRepo(session, repos[0])
+    const resume = opts.resumeClaudeSessionId
+    if (resume && isClaudeSessionId(resume)) {
+      session.claudeSessionId = resume
+      session.claudeSessionIds = [resume]
+    }
     this.sessions.push(session)
-    this.spawn(session, false)
+    this.spawn(session, !!session.claudeSessionId)
     return session
+  }
+
+  /**
+   * Continues a conversation from History. A hub session that already had it is reused,
+   * keeping its tags and job steps (and brought back from the archive if it was closed);
+   * otherwise a new session resumes it.
+   */
+  async resumeFromHistory(projectId: string, claudeSessionId: string, title?: string, cwd?: string): Promise<string> {
+    if (!isClaudeSessionId(claudeSessionId)) throw new Error('Not a Claude conversation id')
+    const owner = this.sessions.find(
+      (s) => s.projectId === projectId && (s.claudeSessionId === claudeSessionId || s.claudeSessionIds.includes(claudeSessionId))
+    )
+    if (owner) {
+      if (owner.running && owner.claudeSessionId === claudeSessionId) return owner.id
+      owner.archived = false
+      owner.closedAt = undefined
+      owner.claudeSessionId = claudeSessionId
+      this.spawn(owner, true)
+      return owner.id
+    }
+    // claude --resume looks the conversation up by folder, so run where it was started.
+    const session = await this.create({
+      projectId,
+      kind: 'claude',
+      name: title?.slice(0, 80),
+      resumeClaudeSessionId: claudeSessionId,
+      cwd
+    })
+    return session.id
   }
 
   restart(id: string): void {
@@ -188,11 +226,23 @@ export class SessionManager {
     if (s) this.spawn(s, true)
   }
 
+  /** Stops the session and moves it to the archive, where History still finds it. */
   close(id: string): void {
     this.ptys.remove(id)
     this.clearRuntime(id)
     this.retireSpawnKey(id)
-    this.sessions = this.sessions.filter((s) => s.id !== id)
+    const s = this.get(id)
+    if (s) {
+      s.archived = true
+      s.closedAt = new Date().toISOString()
+      s.running = false
+      s.attentionState = 'exited'
+      s.unread = false
+    }
+    // Keep the archive bounded: the oldest closed sessions go first.
+    const archived = this.sessions.filter((x) => x.archived).sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? ''))
+    const drop = new Set(archived.slice(MAX_ARCHIVED).map((x) => x.id))
+    if (drop.size) this.sessions = this.sessions.filter((x) => !drop.has(x.id))
     this.changed()
   }
 
@@ -394,7 +444,10 @@ export class SessionManager {
     const raw = event.payload.session_id
     const claudeId = typeof raw === 'string' && isClaudeSessionId(raw) ? raw : undefined
     s.hookSeen = true
-    if (claudeId) s.claudeSessionId = claudeId
+    if (claudeId) {
+      s.claudeSessionId = claudeId
+      if (!s.claudeSessionIds.includes(claudeId)) s.claudeSessionIds.push(claudeId)
+    }
     s.lastActivityAt = new Date().toISOString()
     const next = stateForEvent(event)
     if (next && next !== s.attentionState) {
@@ -696,6 +749,8 @@ function migrateSession(raw: Session): Session {
   delete old.branch
   delete old.pr
   if (old.claudeSessionId && !isClaudeSessionId(old.claudeSessionId)) delete old.claudeSessionId
+  if (!Array.isArray(old.claudeSessionIds)) old.claudeSessionIds = old.claudeSessionId ? [old.claudeSessionId] : []
+  old.claudeSessionIds = old.claudeSessionIds.filter((id) => typeof id === 'string' && isClaudeSessionId(id))
   if (!Array.isArray(old.tagIds)) old.tagIds = []
   if (!Array.isArray(old.autoTags)) old.autoTags = []
   if (!Array.isArray(old.stepHistory)) old.stepHistory = []

@@ -77,6 +77,21 @@ export function openFile(path: string, opts: { line?: number; column?: number; d
   })
 }
 
+/** Opens a past Claude conversation in a read-only tab, next to the editors. */
+export function openTranscript(claudeSessionId: string, title: string): void {
+  if (!api) return
+  const id = `transcript:${claudeSessionId}`
+  const existing = api.getPanel(id)
+  if (existing) return existing.api.setActive()
+  api.addPanel({
+    id,
+    component: 'transcript',
+    title: title.length > 40 ? title.slice(0, 40) + '…' : title,
+    params: { claudeSessionId, title },
+    position: editorPosition()
+  })
+}
+
 /** Editors subscribe so a repeated open of the same file can jump to a new line. */
 export function onRevealRequest(cb: (path: string, line?: number, column?: number) => void): () => void {
   listeners.add(cb)

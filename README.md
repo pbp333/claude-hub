@@ -26,6 +26,7 @@ Needs Node 24+ and Claude Code on your PATH (or set `claudeCommand` in `settings
 - **Dialogs**: a headless terminal tracks each session's screen. When the CLI shows a selection dialog (folder trust, login, feature offers), the session is marked "Needs you" and any job-step prompt waits until you answer it.
 - **Job types** are step lists picked when opening a session. A step can paste a prompt (`autoSend` presses Enter too), and moves on manually, when Claude stops (`stop`), or on a GitHub condition (`{ "github": "prOpen" }`). A step can set a tag while active.
 - **GitHub tags** come from `gh pr view` for each of the session's repos on its current branch (every `pollIntervalSec`, and after each Stop; results are shared between sessions), turned into tags by `rules.json`. A job step waiting on a GitHub condition moves on when any of the session's repos meets it.
+- **History** (sidebar tab, ⌘/Ctrl+Shift+H): every Claude conversation recorded for the open folder, read from Claude Code's own transcripts in `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`), including conversations started outside the app and in subfolders. Each shows its title, when, active time and size, plus the hub session, job type and tags it belonged to. Opening one shows a read-only transcript: prompts, replies, tool calls (collapsed, with input and result) and subagent runs. **Resume** continues it in a session (`claude --resume`, in the folder it was started in); a closed session that had it comes back with its tags and job steps. Closing a session archives it rather than deleting it, so this information stays.
 - **macOS**: closing a window leaves its sessions running; a notification click reopens the folder's window.
 - **Files**: file paths printed in a terminal become links; ⌘/Ctrl+click opens them at that line in a Monaco tab. Edits on disk reload into open editors; unsaved edits are kept and flagged. The editor opens files inside your open folders only.
 
@@ -55,13 +56,14 @@ Step fields: `id`, `name`, `prompt`, `autoSend`, `advanceOn` (`"manual"`, `"stop
 | ⌘/Ctrl+P | Open file |
 | ⌘/Ctrl+Shift+P | Command palette |
 | ⌘/Ctrl+B | Toggle file tree |
+| ⌘/Ctrl+Shift+H | History |
 | ⌘/Ctrl+W | Close tab |
 
 All rebindable in `settings.json` → `keybindings`. Right-click a session for tags, job type, steps, rename, restart and close.
 
 ## Security
 
-- The window only shows the app's own page: navigation and file drops are blocked, the renderer is sandboxed with context isolation, and every IPC call is checked to come from that page. File reads and writes are limited to your open folders and the config folder.
+- The window only shows the app's own page: navigation and file drops are blocked, the renderer is sandboxed with context isolation, and every IPC call is checked to come from that page. File reads and writes are limited to your open folders and the config folder. History reads transcripts through separate channels that take a workspace and a conversation id (a UUID), never a path.
 - The hook server listens on `127.0.0.1` only, checks the Host header, and requires a per-session token (compared in constant time). The token is in each session's environment, so programs running inside a session can post events for that session only; Claude's session id from an event is accepted only if it is a UUID, since it ends up on the `--resume` command line.
 - git and gh run with `core.fsmonitor=false` and `protocol.ext.allow=never` forced, so a repo's own `.git/config` can't make them run programs when you open a folder.
 - Installers are unsigned (no Apple Developer ID or Windows certificate). macOS needs right-click → Open the first time; Windows SmartScreen asks once. Packaged builds have Electron's RunAsNode, NODE_OPTIONS and inspector fuses off and asar integrity on.
@@ -76,6 +78,8 @@ Environment variables for testing without clicking through the UI. They work in 
 - `CLAUDE_HUB_DEMO="claude|shell:<folder>[:<jobTypeId>]"`: open the folder and start a session on launch.
 - `CLAUDE_HUB_DEMO_INPUT` / `CLAUDE_HUB_DEMO_INPUT_DELAY`: type into that session (JSON string escapes).
 - `CLAUDE_HUB_DEMO_OPEN="<path>:<line>"`: open a file as a terminal link would.
+- `CLAUDE_HUB_DEMO_TRANSCRIPT=<conversation id>`: show History and open that conversation.
+- `CLAUDE_HUB_DEMO_RESUME=<conversation id>`: resume that conversation from History.
 - `CLAUDE_HUB_SCREENSHOT=<file.png>` / `CLAUDE_HUB_SCREENSHOT_DELAY`: capture the window and quit.
 - `CLAUDE_HUB_DEBUG=1`: log hook events, state changes and the renderer console.
 

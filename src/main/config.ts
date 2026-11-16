@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS: Settings = {
     quickOpen: 'CmdOrCtrl+P',
     commandPalette: 'CmdOrCtrl+Shift+P',
     toggleFileTree: 'CmdOrCtrl+B',
+    showHistory: 'CmdOrCtrl+Shift+H',
     closeTab: 'CmdOrCtrl+W'
   }
 }
