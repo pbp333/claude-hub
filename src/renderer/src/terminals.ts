@@ -38,7 +38,10 @@ export function getTerminal(sessionId: string): Entry {
     allowProposedApi: true,
     scrollback: 10000,
     macOptionIsMeta: true,
-    theme: { background: '#1e1e1e' }
+    theme: { background: '#1e1e1e' },
+    // Claude Code prints its links as OSC 8 hyperlinks. Without a handler xterm falls back to
+    // confirm() + window.open(), which the app blocks, so nothing happened on click.
+    linkHandler: { activate: (_e, uri) => openLink(uri), allowNonHttpProtocols: true }
   })
   const fit = new FitAddon()
   term.loadAddon(fit)
@@ -124,6 +127,26 @@ export function fitTerminal(sessionId: string): void {
   }
 }
 
+/** Web links open in the browser; file:// links open in the editor (line from "#L12" or ":12"). */
+export function openLink(uri: string): void {
+  if (/^https?:\/\//i.test(uri)) return window.hub.openExternal(uri)
+  if (!/^file:\/\//i.test(uri)) return
+  try {
+    const url = new URL(uri)
+    let path = decodeURIComponent(url.pathname)
+    if (/^\/[a-zA-Z]:\//.test(path)) path = path.slice(1) // file:///C:/...
+    let line = Number(url.hash.match(/^#L?(\d+)/)?.[1]) || undefined
+    const suffix = path.match(/:(\d+)(?::(\d+))?$/)
+    if (suffix) {
+      line = Number(suffix[1])
+      path = path.slice(0, suffix.index)
+    }
+    openFile(path, { line, column: suffix?.[2] ? Number(suffix[2]) : undefined })
+  } catch {
+    // malformed link
+  }
+}
+
 async function provideFileLinks(
   sessionId: string,
   term: Terminal,
@@ -155,7 +178,7 @@ async function provideFileLinks(
       range: { start: { x: m.index + 1, y }, end: { x: m.index + m.text.length, y } },
       decorations: { underline: true, pointerCursor: true },
       activate: (event) => {
-        if (event.metaKey || event.ctrlKey) openFile(path, { line: m.line, column: m.column })
+        if (event.button === 0) openFile(path, { line: m.line, column: m.column })
       }
     })
   }
