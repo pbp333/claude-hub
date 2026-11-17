@@ -15,7 +15,8 @@ import { Sidebar } from './components/Sidebar'
 import { TerminalPanel } from './components/TerminalPanel'
 import { TranscriptPanel } from './components/TranscriptPanel'
 import { Welcome } from './components/Welcome'
-import { getSession, useProject, useUi } from './store'
+import { needsAttention } from '../../shared/tags'
+import { getSession, useProject, useSession, useUi } from './store'
 import { disposeTerminal } from './terminals'
 import {
   activeSessionFromPanel,
@@ -77,10 +78,21 @@ async function onReady(event: DockviewReadyEvent, projectId: string): Promise<vo
   if (id) useUi.getState().setActiveSession(id)
 }
 
-/** A session tab's × closes the session itself, not just the tab. */
+/**
+ * Session tabs show the session's status dot and stand out while it needs you; their ×
+ * closes the session itself, not just the tab.
+ */
 function Tab(props: IDockviewPanelHeaderProps) {
   const id = props.api.id.startsWith('session:') ? props.api.id.slice(8) : undefined
-  return <DockviewDefaultTab {...props} closeActionOverride={id ? () => window.hub.requestCloseSession(id) : undefined} />
+  const session = useSession(id)
+  if (!id) return <DockviewDefaultTab {...props} />
+  const attention = !!session && needsAttention(session)
+  return (
+    <div className={`hub-tab${attention ? ' attention' : ''}`} title={attention ? 'Needs you' : undefined}>
+      {session && <span className={`dot ${session.attentionState}`} />}
+      <DockviewDefaultTab {...props} closeActionOverride={() => window.hub.requestCloseSession(id)} />
+    </div>
+  )
 }
 
 function handleCommand(cmd: UiCommand): void {
