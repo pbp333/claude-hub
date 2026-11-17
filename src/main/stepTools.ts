@@ -1,3 +1,4 @@
+import { currentStep } from '../shared/tags.ts'
 import type { JobStep, Session } from '../shared/types'
 
 /**
@@ -5,9 +6,6 @@ import type { JobStep, Session } from '../shared/types'
  * session the app started as a small MCP server (see HookServer). Kept free of Electron so
  * it can be tested on its own.
  */
-
-// Same as shared/tags currentStep; repeated so tests can load this file without a bundler.
-const currentStep = (s: Session) => s.steps?.find((st) => st.id === s.currentStepId)
 
 export const MCP_SERVER_NAME = 'claude-hub'
 const PROTOCOL_VERSION = '2025-06-18'
@@ -55,6 +53,7 @@ export function jobStatus(s: Session): string {
   for (const st of s.steps) lines.push(`${st.id === step.id ? '→' : ' '} ${st.id}: ${st.name} (closed by ${describeCloser(st)})`)
   lines.push('', `Current step: ${step.name} (id "${step.id}")`)
   if (step.prompt) lines.push(`Goal: ${step.prompt}`)
+  if (step.skill) lines.push(`Skill for this step: ${step.skill}`)
   if (s.pendingStep?.stepId === step.id) lines.push('You already reported it done; the user has not accepted it yet.')
   return lines.join('\n')
 }
@@ -69,6 +68,7 @@ export function stepContext(s: Session): string | undefined {
   return (
     `[Claude Hub] This session is on step "${step.name}" (id "${step.id}") of the "${s.jobTypeName ?? s.jobTypeId}" job.` +
     (step.prompt ? ` Step goal: ${step.prompt}` : '') +
+    (step.skill ? ` This step uses the ${step.skill} skill.` : '') +
     ` When the goal is met and verified, call the ${MCP_SERVER_NAME} complete_step tool with step_id "${step.id}". Don't call it before then.`
   )
 }
@@ -97,10 +97,15 @@ export function decideCompletion(s: Session, args: Record<string, unknown>): Com
 }
 
 /** What complete_step tells Claude after the step moved on. */
-export function completedText(step: JobStep, next: JobStep | undefined, continueNow: boolean): string {
+/**
+ * What complete_step tells Claude after the step moved on: carry on with the next goal now,
+ * stop because the app starts the next step's skill after this turn, or stop for the user.
+ */
+export function completedText(step: JobStep, next: JobStep | undefined, then: 'continue' | 'skill' | 'wait'): string {
   if (!next) return `Step "${step.name}" is done. That was the last step of the job.`
   let text = `Step "${step.name}" is done. Now on step "${next.name}" (id "${next.id}").`
-  if (next.prompt && continueNow) text += `\nIts goal: ${next.prompt}\nContinue with it now.`
+  if (then === 'continue' && next.prompt) text += `\nIts goal: ${next.prompt}\nContinue with it now.`
+  else if (then === 'skill') text += ` End your turn now; the app then starts it with /${next.skill}.`
   else text += ' Stop here; the user will start it.'
   return text
 }

@@ -253,6 +253,7 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
           <div className="session-step">
             <span title={step.advanceOn === 'claude' ? 'Claude closes this step when its goal is met' : undefined}>
               {s.jobTypeName} · {stepIndex + 1}/{s.steps.length} {step.name}
+              {step.skill && <span className="muted"> · /{step.skill}</span>}
               {step.advanceOn === 'claude' && <span className="muted"> · auto</span>}
             </span>
             {!isLast && !s.pendingStep && (

@@ -61,6 +61,11 @@ export interface JobStep {
   prompt?: string
   autoSend?: boolean
   advanceOn?: AdvanceOn
+  /**
+   * A skill run when the step starts: "/<skill> <prompt>" is sent to Claude (the prompt
+   * becomes the skill's arguments). Sent right away unless autoSend is false.
+   */
+  skill?: string
   /** With advanceOn "claude": Claude's completion waits for the user to accept it. */
   confirm?: boolean
   /** Tag id or name set while the session is on this step. */

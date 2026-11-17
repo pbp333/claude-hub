@@ -98,6 +98,7 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
             {job.steps.map((s) => (
               <li key={s.id}>
                 {s.name}
+                {s.skill && <code className="step-skill"> /{s.skill}</code>}
                 {s.advanceOn && s.advanceOn !== 'manual' && (
                   <span className="muted">
                     {' '}

@@ -1,5 +1,12 @@
 import type { JobStep, Session, Tag } from './types'
 
+/** What starting a step types into Claude: its skill as a slash command, or its prompt. */
+export function stepInput(step: JobStep): { text: string; send: boolean } | undefined {
+  const prompt = step.prompt?.trim()
+  if (step.skill) return { text: `/${step.skill}${prompt ? ' ' + prompt : ''}`, send: step.autoSend !== false }
+  return prompt ? { text: prompt, send: !!step.autoSend } : undefined
+}
+
 export function currentStep(session: Session): JobStep | undefined {
   return session.steps?.find((s) => s.id === session.currentStepId)
 }

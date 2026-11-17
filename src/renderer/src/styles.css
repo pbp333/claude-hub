@@ -969,3 +969,8 @@ pre.code {
   color: inherit;
   background: rgba(255, 255, 255, 0.08);
 }
+
+.step-skill {
+  font-size: 11px;
+  opacity: 0.8;
+}

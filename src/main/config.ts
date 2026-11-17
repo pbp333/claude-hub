@@ -257,6 +257,8 @@ export function validateJobTypes(value: unknown): string[] {
         (isObject(advance) && PR_CONDITIONS.includes(advance.github as PrCondition))
       if (!validAdvance)
         problems.push(`${at}: "advanceOn" must be "manual", "stop", "claude" or { "github": one of ${PR_CONDITIONS.join(', ')} }`)
+      if (step.skill !== undefined && !(typeof step.skill === 'string' && /^[\w.-]+(:[\w.-]+)?$/.test(step.skill)))
+        problems.push(`${at}: "skill" must be a skill name like "build-apk" or "plugin:skill" (no slash)`)
       if (step.confirm !== undefined && typeof step.confirm !== 'boolean') problems.push(`${at}: "confirm" must be true or false`)
       return undefined
     })

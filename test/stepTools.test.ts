@@ -53,9 +53,9 @@ test('prompts get step context only while Claude closes the step', () => {
 })
 
 test('the next step goal is returned when Claude should carry on', () => {
-  assert.ok(completedText(steps[1], steps[2], true).includes('Its goal: Make it pass.'))
-  assert.ok(completedText(steps[1], steps[2], false).includes('the user will start it'))
-  assert.ok(completedText(steps[3], undefined, false).includes('last step'))
+  assert.ok(completedText(steps[1], steps[2], 'continue').includes('Its goal: Make it pass.'))
+  assert.ok(completedText(steps[1], steps[2], 'wait').includes('the user will start it'))
+  assert.ok(completedText(steps[3], undefined, 'wait').includes('last step'))
 })
 
 test('MCP messages: initialize, list, call, notifications, unknown methods', () => {
@@ -122,4 +122,21 @@ test('the MCP endpoint and hook replies use the per-process token', async () => 
   } finally {
     server.stop()
   }
+})
+
+test('a step with a skill starts as its slash command, sent unless autoSend is false', async () => {
+  const { stepInput } = await import('../src/shared/tags.ts')
+  assert.deepEqual(stepInput({ id: 'a', name: 'A', skill: 'build-apk', prompt: 'recipe-app debug' }), {
+    text: '/build-apk recipe-app debug',
+    send: true
+  })
+  assert.deepEqual(stepInput({ id: 'a', name: 'A', skill: 'caveman:caveman-review', autoSend: false }), {
+    text: '/caveman:caveman-review',
+    send: false
+  })
+  assert.deepEqual(stepInput({ id: 'a', name: 'A', prompt: 'Plan it.' }), { text: 'Plan it.', send: false })
+  assert.equal(stepInput({ id: 'a', name: 'A' }), undefined)
+  assert.ok(completedText(steps[1], { id: 'b', name: 'Build', skill: 'build-apk' }, 'skill').includes('/build-apk'))
+  assert.deepEqual(validateJobTypes([{ id: 'j', name: 'J', steps: [{ id: 'a', name: 'A', skill: 'plugin:x-y' }] }]), [])
+  assert.equal(validateJobTypes([{ id: 'j', name: 'J', steps: [{ id: 'a', name: 'A', skill: '/build-apk; rm' }] }]).length, 1)
 })

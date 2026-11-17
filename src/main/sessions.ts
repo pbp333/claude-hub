@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, resolve } from 'node:path'
-import { currentStep, needsAttention } from '../shared/tags'
+import { currentStep, needsAttention, stepInput } from '../shared/tags'
 import type {
   AttentionState,
   HubState,
@@ -354,7 +354,8 @@ export class SessionManager {
     // A new session starts on the job's first step: paste its prompt once the CLI is ready.
     if (!resume && session.kind === 'claude') {
       const step = currentStep(session)
-      if (step?.prompt) rt.pendingPrompt = { text: step.prompt, send: !!step.autoSend }
+      const input = step && stepInput(step)
+      if (input) rt.pendingPrompt = input
     }
     rt.readyDeadline = setTimeout(() => this.onReady(session.id), READY_MAX_MS)
     this.update(session.id, (s) => {
@@ -503,12 +504,17 @@ export class SessionManager {
         text: `Asked the user to accept step "${step.name}" as done. Stop here and wait; you'll get the next step's instructions once they accept.`
       }
     }
-    if (!next) return { text: completedText(step, undefined, false) }
-    // The next step's goal goes back in the tool result, so Claude carries on in the same turn
-    // instead of the prompt being typed in while it's still working.
-    const continueNow = !!next.autoSend && !!next.prompt
-    this.setStep(s.id, next.id, `Claude finished "${step.name}"${note ? ` (${note})` : ''}`, { promptInResult: continueNow })
-    return { text: completedText(step, next, continueNow) }
+    if (!next) return { text: completedText(step, undefined, 'wait') }
+    // A plain next prompt goes back in the tool result, so Claude carries on in the same turn
+    // instead of it being typed in while Claude is still working. A skill is typed in as its
+    // slash command once this turn ends.
+    const input = stepInput(next)
+    const then = input?.send ? (next.skill ? 'skill' : 'continue') : 'wait'
+    this.setStep(s.id, next.id, `Claude finished "${step.name}"${note ? ` (${note})` : ''}`, {
+      promptInResult: then === 'continue',
+      afterTurn: true
+    })
+    return { text: completedText(step, next, then) }
   }
 
   /** The user didn't accept Claude's "step done": stay on the step and let them say why. */
@@ -622,7 +628,8 @@ export class SessionManager {
     })
     const s = this.get(id)
     const step = s && currentStep(s)
-    if (s?.running && step?.prompt) this.deliverPrompt(s, step.prompt, !!step.autoSend)
+    const input = step && stepInput(step)
+    if (s?.running && input) this.deliverPrompt(s, input.text, input.send)
   }
 
   nextStep(id: string, reason?: string): void {
@@ -635,7 +642,7 @@ export class SessionManager {
     this.setStep(id, s.steps[i + 1].id, reason)
   }
 
-  setStep(id: string, stepId: string, reason?: string, opts: { promptInResult?: boolean } = {}): void {
+  setStep(id: string, stepId: string, reason?: string, opts: { promptInResult?: boolean; afterTurn?: boolean } = {}): void {
     const s = this.get(id)
     const step = s?.steps?.find((st) => st.id === stepId)
     if (!s || !step || s.currentStepId === stepId) return
@@ -648,8 +655,11 @@ export class SessionManager {
       x.stepHistory.push({ stepId, enteredAt: new Date().toISOString(), ...(why ? { reason: why } : {}) })
     })
     if (reason) this.host.notify(s, `${reason}: moved to "${step.name}"`)
-    if (s.running && step.prompt && !opts.promptInResult) {
-      this.deliverPrompt(s, step.prompt, !!step.autoSend)
+    const input = stepInput(step)
+    if (s.running && input && !opts.promptInResult) {
+      // Typed in when Claude's current turn ends (see the Stop hook).
+      if (opts.afterTurn) this.rt(id).pendingPrompt = input
+      else this.deliverPrompt(s, input.text, input.send)
     }
     // A step waiting on GitHub may already be satisfied.
     if (typeof step.advanceOn === 'object') this.schedulePrCheck(id, 1000)
