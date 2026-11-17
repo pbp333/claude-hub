@@ -13,6 +13,8 @@ export interface HubApi {
   createSession(opts: NewSessionOptions): Promise<string>
   restartSession(id: string): void
   closeSession(id: string): void
+  /** Closes the session, asking first if Claude is mid-turn. */
+  requestCloseSession(id: string): void
   renameSession(id: string, name: string): void
   sessionMenu(id: string): void
   setActiveSession(id: string | undefined): void

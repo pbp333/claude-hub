@@ -1,4 +1,11 @@
-import { DockviewReact, themeDark, type DockviewReadyEvent, type IDockviewPanelProps } from 'dockview-react'
+import {
+  DockviewDefaultTab,
+  DockviewReact,
+  themeDark,
+  type DockviewReadyEvent,
+  type IDockviewPanelHeaderProps,
+  type IDockviewPanelProps
+} from 'dockview-react'
 import { useEffect } from 'react'
 import type { UiCommand } from '../../shared/types'
 import { Dialogs, goToNextNeedsYou } from './components/Dialogs'
@@ -68,6 +75,12 @@ async function onReady(event: DockviewReadyEvent, projectId: string): Promise<vo
   })
   const id = activeSessionFromPanel(api.activePanel)
   if (id) useUi.getState().setActiveSession(id)
+}
+
+/** A session tab's × closes the session itself, not just the tab. */
+function Tab(props: IDockviewPanelHeaderProps) {
+  const id = props.api.id.startsWith('session:') ? props.api.id.slice(8) : undefined
+  return <DockviewDefaultTab {...props} closeActionOverride={id ? () => window.hub.requestCloseSession(id) : undefined} />
 }
 
 function handleCommand(cmd: UiCommand): void {
@@ -158,6 +171,7 @@ export function App() {
             onReady={(e) => void onReady(e, project.id)}
             theme={themeDark}
             watermarkComponent={Watermark}
+            defaultTabComponent={Tab}
             defaultRenderer="always"
           />
       </main>

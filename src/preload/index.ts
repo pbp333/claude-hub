@@ -19,6 +19,7 @@ const api: HubApi = {
   createSession: (opts) => ipcRenderer.invoke('create-session', opts),
   restartSession: (id) => ipcRenderer.send('restart-session', id),
   closeSession: (id) => ipcRenderer.send('close-session', id),
+  requestCloseSession: (id) => ipcRenderer.send('request-close-session', id),
   renameSession: (id, name) => ipcRenderer.send('rename-session', id, name),
   sessionMenu: (id) => ipcRenderer.send('session-menu', id),
   setActiveSession: (id) => ipcRenderer.send('set-active-session', id),

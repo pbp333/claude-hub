@@ -422,24 +422,33 @@ function sessionContextMenu(sessionId: string, hw: HubWindow): void {
     { label: 'Rename…', click: () => command({ type: 'rename', sessionId }, hw) },
     { label: s.running ? 'Restart' : s.claudeSessionId ? 'Resume' : 'Start again', click: () => manager.restart(sessionId) },
     { type: 'separator' },
-    {
-      label: 'Close session',
-      click: async () => {
-        if (s.running) {
-          const r = await dialog.showMessageBox(hw.win, {
-            type: 'question',
-            buttons: ['Close', 'Cancel'],
-            defaultId: 0,
-            message: `Close "${s.name}"?`,
-            detail: 'The running process will be stopped.'
-          })
-          if (r.response !== 0) return
-        }
-        manager.close(sessionId)
-      }
-    }
+    { label: 'Close session', click: () => void closeSession(hw.win, sessionId) }
   ]
   Menu.buildFromTemplate(template).popup({ window: hw.win })
+}
+
+/**
+ * Stops a session and archives it (History can resume it). Asks first only when that would
+ * cut Claude off mid-turn, or stop a shell that is printing output right now.
+ */
+async function closeSession(win: BrowserWindow, sessionId: string): Promise<void> {
+  const s = manager.get(sessionId)
+  if (!s) return
+  if (s.running && (s.attentionState === 'working' || s.attentionState === 'active')) {
+    const r = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['Close', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      message: `${s.kind === 'claude' ? 'Claude is still working in' : 'Something is still running in'} "${s.name}". Close it?`,
+      detail:
+        s.kind === 'claude'
+          ? 'The current turn stops. The conversation stays in History and can be resumed.'
+          : 'The running process will be stopped.'
+    })
+    if (r.response !== 0) return
+  }
+  manager.close(sessionId)
 }
 
 // ---- IPC -----------------------------------------------------------------
@@ -521,6 +530,10 @@ function registerIpc(): void {
   })
   on('restart-session', (_e, id) => manager.restart(str(id)))
   on('close-session', (_e, id) => manager.close(str(id)))
+  on('request-close-session', (e, id) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (win) void closeSession(win, str(id))
+  })
   on('rename-session', (_e, id, name) => manager.rename(str(id), str(name, 200)))
   on('session-menu', (e, id) => {
     const hw = fromEvent(e)
@@ -665,6 +678,9 @@ async function runDevAids(): Promise<void> {
         command({ type: 'showHistory' }, hw)
         command({ type: 'openTranscript', claudeSessionId: transcript, title: 'Conversation' }, hw)
       }, 3000)
+    // CLAUDE_HUB_DEMO_CLOSE=<ms> presses Close Tab (Cmd/Ctrl+W) after that delay.
+    const close = Number(env('CLAUDE_HUB_DEMO_CLOSE'))
+    if (close) setTimeout(() => command({ type: 'closeTab' }, hw), close)
     // CLAUDE_HUB_DEMO_INPUT is typed into the session; it is a JSON string body ("\r" = Enter).
     const input = env('CLAUDE_HUB_DEMO_INPUT')
     if (input) {

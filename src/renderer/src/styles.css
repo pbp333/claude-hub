@@ -945,3 +945,27 @@ pre.code {
 .step-reason {
   font-size: 11px;
 }
+
+.session-row {
+  position: relative;
+}
+.close-session {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 0 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted, #888);
+  font-size: 16px;
+  line-height: 18px;
+  opacity: 0;
+}
+.session-row:hover .close-session,
+.close-session:focus-visible {
+  opacity: 1;
+}
+.close-session:hover {
+  color: inherit;
+  background: rgba(255, 255, 255, 0.08);
+}

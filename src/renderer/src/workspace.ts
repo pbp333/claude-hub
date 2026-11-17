@@ -98,8 +98,11 @@ export function onRevealRequest(cb: (path: string, line?: number, column?: numbe
   return () => listeners.delete(cb)
 }
 
+/** Closing a session's tab closes the session (it stays in History); other tabs just close. */
 export function closeActivePanel(): void {
-  api?.activePanel?.api.close()
+  const panel = api?.activePanel
+  if (panel?.id.startsWith('session:')) window.hub.requestCloseSession(panel.id.slice(8))
+  else panel?.api.close()
 }
 
 export function saveLayout(): void {

@@ -27,7 +27,7 @@ Needs Node 24+ and Claude Code on your PATH (or set `claudeCommand` in `settings
 - **Job types** are step lists picked when opening a session. A step can paste a prompt (`autoSend` presses Enter too), and moves on manually, when Claude stops (`stop`), on a GitHub condition (`{ "github": "prOpen" }`), or when Claude says it's done (`claude`). A step can set a tag while active.
 - **Claude closes steps**: every session gets two tools from the app (a local MCP server, `claude-hub`): `job_status` and `complete_step`. While the current step is a `claude` step, each prompt carries a short note telling Claude the step's goal and to call `complete_step` once it's met. Claude can only close the step it's on, never skip one or close a manual or GitHub step. If the next step has `autoSend`, its goal comes back in the tool result and Claude carries on in the same turn. With `"confirm": true`, Claude's "done" waits for you: the session shows as needing you with **Accept** / **Not yet**. Accept also works through Next step (⌘/Ctrl+Alt+N); Not yet leaves "Step … isn't done yet: " in the prompt box for you to finish. Claude's note is kept in the step history.
 - **GitHub tags** come from `gh pr view` for each of the session's repos on its current branch (every `pollIntervalSec`, and after each Stop; results are shared between sessions), turned into tags by `rules.json`. A job step waiting on a GitHub condition moves on when any of the session's repos meets it.
-- **History** (sidebar tab, ⌘/Ctrl+Shift+H): every Claude conversation recorded for the open folder, read from Claude Code's own transcripts in `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`), including conversations started outside the app and in subfolders. Each shows its title, when, active time and size, plus the hub session, job type and tags it belonged to. Opening one shows a read-only transcript: prompts, replies, tool calls (collapsed, with input and result) and subagent runs. **Resume** continues it in a session (`claude --resume`, in the folder it was started in); a closed session that had it comes back with its tags and job steps. Closing a session archives it rather than deleting it, so this information stays.
+- **History** (sidebar tab, ⌘/Ctrl+Shift+H): every Claude conversation recorded for the open folder, read from Claude Code's own transcripts in `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`), including conversations started outside the app and in subfolders. Each shows its title, when, active time and size, plus the hub session, job type and tags it belonged to. Opening one shows a read-only transcript: prompts, replies, tool calls (collapsed, with input and result) and subagent runs. **Resume** continues it in a session (`claude --resume`, in the folder it was started in); a closed session that had it comes back with its tags and job steps. Closing a session (its tab, the × on its sidebar row, or ⌘/Ctrl+W) stops it and archives it rather than deleting it, so this information stays. It asks first only while Claude is mid-turn.
 - **macOS**: closing a window leaves its sessions running; a notification click reopens the folder's window.
 - **Files**: file paths printed in a terminal become links (including the hyperlinks Claude prints); a click opens them at that line in a Monaco tab. Edits on disk reload into open editors; unsaved edits are kept and flagged. The editor opens files inside your open folders only. Web links open in your browser.
 
@@ -58,7 +58,7 @@ Step fields: `id`, `name`, `prompt`, `autoSend`, `advanceOn` (`"manual"`, `"stop
 | ⌘/Ctrl+Shift+P | Command palette |
 | ⌘/Ctrl+B | Toggle file tree |
 | ⌘/Ctrl+Shift+H | History |
-| ⌘/Ctrl+W | Close tab |
+| ⌘/Ctrl+W | Close tab (a session tab closes the session) |
 
 All rebindable in `settings.json` → `keybindings`. Right-click a session for tags, job type, steps, rename, restart and close.
 
@@ -78,6 +78,7 @@ Environment variables for testing without clicking through the UI. They work in 
 - `CLAUDE_HUB_USER_DATA=<dir>`: use a separate data folder.
 - `CLAUDE_HUB_DEMO="claude|shell:<folder>[:<jobTypeId>]"`: open the folder and start a session on launch.
 - `CLAUDE_HUB_DEMO_INPUT` / `CLAUDE_HUB_DEMO_INPUT_DELAY`: type into that session (JSON string escapes).
+- `CLAUDE_HUB_DEMO_CLOSE=<ms>`: press Close Tab after that delay.
 - `CLAUDE_HUB_DEMO_OPEN="<path>:<line>"`: open a file as a terminal link would.
 - `CLAUDE_HUB_DEMO_TRANSCRIPT=<conversation id>`: show History and open that conversation.
 - `CLAUDE_HUB_DEMO_RESUME=<conversation id>`: resume that conversation from History.

@@ -323,6 +323,16 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
           {s.kind === 'claude' && s.claudeSessionId ? 'Resume' : 'Start'}
         </button>
       )}
+      <button
+        className="close-session"
+        title="Close session (stays in History)"
+        onClick={(e) => {
+          e.stopPropagation()
+          window.hub.requestCloseSession(s.id)
+        }}
+      >
+        ×
+      </button>
     </div>
   )
 }
