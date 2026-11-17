@@ -16,6 +16,7 @@ import type {
 import { CONFIG_FILES, loadConfig, type LoadedConfig } from './config'
 import { cmdShimCommandLine, getEnv, which } from './env'
 import { isInside } from './files'
+import { claudeProjectsDir, closestConversation, listHistory } from './history'
 import { currentBranch, fetchPr, findRepos, repoFor, toPosix } from './git'
 import { HookServer, isClaudeSessionId, shouldNotify, showsDialog, stateForEvent, type HookEvent } from './hooks'
 import { PtyManager } from './pty'
@@ -105,7 +106,7 @@ export class SessionManager {
     }
     if (this.config.settings.restoreOnLaunch) {
       const open = new Set(openProjectIds)
-      for (const s of this.sessions) if (wasRunning.has(s.id) && open.has(s.projectId)) this.spawn(s, true)
+      for (const s of this.sessions) if (wasRunning.has(s.id) && open.has(s.projectId)) void this.resume(s)
     }
     this.pollTimer = setInterval(() => this.pollPrs(), 15000)
     this.changed()
@@ -228,7 +229,45 @@ export class SessionManager {
 
   restart(id: string): void {
     const s = this.get(id)
-    if (s) this.spawn(s, true)
+    if (s) void this.resume(s)
+  }
+
+  /**
+   * Starts a session again, continuing its Claude conversation. If the session's own
+   * conversation isn't known (or its transcript is gone), the conversation in this folder
+   * whose title is closest to the session's name is resumed instead; failing that, Claude's
+   * own resume picker opens, searching for the name.
+   */
+  private async resume(s: Session): Promise<void> {
+    if (s.kind !== 'claude') return this.spawn(s, true)
+    const project = this.project(s.projectId)
+    let items: Awaited<ReturnType<typeof listHistory>> = []
+    try {
+      if (project) items = await listHistory(claudeProjectsDir(getEnv()), project.path)
+    } catch {
+      items = []
+    }
+    if (s.claudeSessionId && items.some((i) => i.claudeSessionId === s.claudeSessionId)) return this.spawn(s, true)
+    const busy = new Set(
+      this.sessions.filter((x) => x.id !== s.id && x.running && !x.archived && x.claudeSessionId).map((x) => x.claudeSessionId!)
+    )
+    const match = closestConversation(items, s.name, busy)
+    if (match) {
+      this.update(s.id, (x) => {
+        x.claudeSessionId = match.claudeSessionId
+        if (!x.claudeSessionIds.includes(match.claudeSessionId)) x.claudeSessionIds.push(match.claudeSessionId)
+        // claude --resume finds a conversation by the folder it was recorded in.
+        if (project && match.cwd && isInside(project.path, match.cwd) && existsSync(match.cwd)) x.cwd = match.cwd
+      })
+      this.spawn(s, true)
+      this.ptys.print(s.id, `\x1b[2mResuming "${match.title}", the conversation closest to this session's name.\x1b[0m\r\n`)
+      return
+    }
+    // Only a session that had a conversation (and lost track of it) gets the picker; one that
+    // never talked to Claude just starts fresh.
+    const hadConversation = !!s.claudeSessionId || s.claudeSessionIds.length > 0
+    this.update(s.id, (x) => (x.claudeSessionId = undefined))
+    this.spawn(s, true, hadConversation ? s.name : undefined)
   }
 
   /** Stops the session and moves it to the archive, where History still finds it. */
@@ -293,7 +332,8 @@ export class SessionManager {
     this.hooks.stop()
   }
 
-  private spawn(session: Session, resume: boolean): void {
+  /** `searchName`: no known conversation; open Claude's resume picker searching for this. */
+  private spawn(session: Session, resume: boolean, searchName?: string): void {
     const settings = this.config.settings
     // Each process gets a new spawn key and token: hooks from a process that was replaced
     // (restart) or from another session are rejected or ignored.
@@ -330,6 +370,11 @@ export class SessionManager {
         claudeArgs.push('--settings', this.store.path('hub-hooks.json'), '--mcp-config', this.store.path('hub-mcp.json'))
       if (resume && session.claudeSessionId && isClaudeSessionId(session.claudeSessionId))
         claudeArgs.push('--resume', session.claudeSessionId)
+      else if (resume && searchName) {
+        // One "--resume=<name>" argument, so a name can't be read as another option.
+        const name = searchName.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 80)
+        if (name) claudeArgs.push(`--resume=${name}`)
+      }
       // .cmd shims can't be spawned directly on Windows; cmd.exe gets one escaped command line.
       if (/\.(cmd|bat)$/i.test(exe)) {
         file = process.env.ComSpec || 'cmd.exe'

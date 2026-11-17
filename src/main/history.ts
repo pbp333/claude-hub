@@ -305,3 +305,43 @@ export async function readSubagent(
   }
   return (await parseTranscript(file, true)).entries
 }
+
+const words = (s: string) =>
+  s
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+
+/** How alike a session name and a conversation title are, from 0 to 1. */
+export function titleSimilarity(name: string, title: string): number {
+  const a = words(name)
+  const b = words(title)
+  if (!a.length || !b.length) return 0
+  if (a.join(' ') === b.join(' ')) return 1
+  const setB = new Set(b)
+  const shared = a.filter((w) => setB.has(w)).length
+  // The name inside the title ("login bug" in "Fix the login bug on Safari") counts almost as a match.
+  if (shared === a.length && a.length >= 2) return 0.9
+  return (2 * shared) / (a.length + b.length)
+}
+
+/** Below this, a title isn't taken as the conversation the session name refers to. */
+export const MATCH_THRESHOLD = 0.6
+
+/**
+ * The conversation whose title is closest to a session name, the newest one on a tie.
+ * Conversations in `exclude` (already running in another session) are skipped.
+ */
+export function closestConversation(items: HistoryItem[], name: string, exclude: Set<string>): HistoryItem | undefined {
+  let best: HistoryItem | undefined
+  let bestScore = MATCH_THRESHOLD
+  for (const item of items) {
+    if (exclude.has(item.claudeSessionId)) continue
+    const score = titleSimilarity(name, item.title)
+    if (score > bestScore || (score === bestScore && best && item.endedAt > best.endedAt) || (score === bestScore && !best)) {
+      best = item
+      bestScore = score
+    }
+  }
+  return best
+}

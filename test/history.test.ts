@@ -84,3 +84,21 @@ test('does not read conversations of other folders', async () => {
   const { projects, root } = setup()
   assert.equal(await readTranscript(projects, root, C), undefined)
 })
+
+test('a session name finds the conversation with the closest title', async () => {
+  const { closestConversation, titleSimilarity } = await import('../src/main/history.ts')
+  const item = (id: string, title: string, endedAt: string) =>
+    ({ claudeSessionId: id, title, endedAt, startedAt: endedAt, messages: 2, activeMs: 0, cwd: '/w', sizeBytes: 1 }) as const
+  const items = [
+    item('a', 'Fix the login bug on Safari', '2026-11-01T00:00:00Z'),
+    item('b', 'claude-hub', '2026-11-02T00:00:00Z'),
+    item('c', 'claude hub', '2026-11-03T00:00:00Z'),
+    item('d', 'Recipe app release notes', '2026-11-04T00:00:00Z')
+  ]
+  assert.equal(titleSimilarity('Claude Hub', 'claude-hub'), 1)
+  assert.equal(closestConversation(items, 'login bug', new Set())?.claudeSessionId, 'a')
+  assert.equal(closestConversation(items, 'Claude Hub', new Set())?.claudeSessionId, 'c', 'newest of equal matches')
+  assert.equal(closestConversation(items, 'Claude Hub', new Set(['c']))?.claudeSessionId, 'b', 'skips running ones')
+  assert.equal(closestConversation(items, 'apps 2', new Set()), undefined)
+  assert.equal(closestConversation(items, 'release', new Set()), undefined, 'one shared word of four is not enough')
+})
