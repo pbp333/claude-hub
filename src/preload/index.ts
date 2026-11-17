@@ -25,6 +25,7 @@ const api: HubApi = {
   toggleTag: (id, tagId) => ipcRenderer.send('toggle-tag', id, tagId),
   nextStep: (id) => ipcRenderer.send('next-step', id),
   setStep: (id, stepId) => ipcRenderer.send('set-step', id, stepId),
+  rejectStep: (id) => ipcRenderer.send('reject-step', id),
   ptyWrite: (id, data) => ipcRenderer.send('pty-write', id, data),
   ptyResize: (id, cols, rows) => ipcRenderer.send('pty-resize', id, cols, rows),
   ptyBuffer: (id) => ipcRenderer.invoke('pty-buffer', id),

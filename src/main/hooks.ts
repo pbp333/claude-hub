@@ -1,7 +1,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { createServer, type Server } from 'node:http'
+import { createServer, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { AttentionState } from '../shared/types'
+import { handleRpc, MCP_SERVER_NAME, TOOLS, type ToolResult } from './stepTools.ts'
 
 export interface HookEvent {
   /** The spawn key from the X-Hub-Session header: "<session id>.<generation>". */
@@ -24,20 +25,28 @@ const EVENTS = [
 
 const MAX_BODY = 1024 * 1024
 
+export interface HookHandlers {
+  /** Handles a hook event; what it returns is the hook's JSON reply (e.g. context for the prompt). */
+  onEvent(event: HookEvent): object | undefined
+  /** Runs one of the step tools for the session with this spawn key. */
+  onTool(hubSessionId: string, name: string, args: Record<string, unknown>): ToolResult
+}
+
 /**
- * Local HTTP server that receives Claude Code `http` hooks from every session the app
- * started. Bound to 127.0.0.1 on a random port. Each running process gets its own
- * random token, so a process inside one session can't post events for another.
+ * Local HTTP server for every session the app started: it receives Claude Code `http`
+ * hooks on /hook and serves the job-step tools as an MCP server on /mcp. Bound to
+ * 127.0.0.1 on a random port. Each running process gets its own random token, so a
+ * process inside one session can't post events or close steps for another.
  */
 export class HookServer {
   private server?: Server
   port = 0
-  private onEvent: (event: HookEvent) => void
+  private handlers: HookHandlers
   /** Spawn key (see SessionManager) → that process's token. */
   private tokens = new Map<string, Buffer>()
 
-  constructor(onEvent: (event: HookEvent) => void) {
-    this.onEvent = onEvent
+  constructor(handlers: HookHandlers) {
+    this.handlers = handlers
   }
 
   /** A fresh token for one process; it is passed to that process only, in its environment. */
@@ -63,13 +72,13 @@ export class HookServer {
       const token = String(req.headers['x-hub-token'] || '')
       // The Host check is defense in depth against DNS rebinding: a page on another name
       // that resolves to 127.0.0.1 would send its own Host.
-      if (
-        req.method !== 'POST' ||
-        req.url !== '/hook' ||
-        req.headers.host !== `127.0.0.1:${this.port}` ||
-        !this.authorized(key, token)
-      ) {
+      if (req.headers.host !== `127.0.0.1:${this.port}` || !this.authorized(key, token) || (req.url !== '/hook' && req.url !== '/mcp')) {
         res.writeHead(403).end()
+        return
+      }
+      // MCP clients may open a GET stream for server messages; this server sends none.
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end()
         return
       }
       req.setEncoding('utf8')
@@ -85,15 +94,23 @@ export class HookServer {
       })
       req.on('end', () => {
         if (tooLarge) return
-        // Answer immediately with an empty decision so Claude never waits on the app.
-        res.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+        let parsed: unknown
         try {
-          const payload = JSON.parse(body) as Record<string, unknown>
-          const name = String(payload.hook_event_name || '')
-          if (name) this.onEvent({ hubSessionId: key, name, payload })
+          parsed = JSON.parse(body)
         } catch {
-          // ignore malformed bodies
+          parsed = undefined
         }
+        if (req.url === '/mcp') return this.answerMcp(key, parsed, res)
+        // Handled synchronously, so Claude gets its answer at once and never waits on the app.
+        let reply: object | undefined
+        try {
+          const payload = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>
+          const name = String(payload.hook_event_name || '')
+          if (name) reply = this.handlers.onEvent({ hubSessionId: key, name, payload })
+        } catch {
+          reply = undefined
+        }
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply ?? {}))
       })
     })
     await new Promise<void>((resolve, reject) => {
@@ -111,6 +128,38 @@ export class HookServer {
     this.server?.close()
   }
 
+  private answerMcp(key: string, message: unknown, res: ServerResponse): void {
+    if (!message || typeof message !== 'object') {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }))
+      return
+    }
+    const call = (name: string, args: Record<string, unknown>): ToolResult => {
+      try {
+        return this.handlers.onTool(key, name, args)
+      } catch (err) {
+        return { text: `Claude Hub couldn't do that: ${(err as Error).message}`, isError: true }
+      }
+    }
+    const replies = (Array.isArray(message) ? message : [message]).map((m) => handleRpc(m, call)).filter(Boolean)
+    if (!replies.length) {
+      res.writeHead(202).end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(Array.isArray(message) ? replies : replies[0]))
+  }
+
+  /** MCP config passed to `claude --mcp-config`: the step tools, authenticated like the hooks. */
+  mcpConfigJson(): string {
+    const server = {
+      type: 'http',
+      url: `http://127.0.0.1:${this.port}/mcp`,
+      headers: { 'X-Hub-Token': '${CLAUDE_HUB_TOKEN}', 'X-Hub-Session': '${CLAUDE_HUB_SESSION_ID}' }
+    }
+    return JSON.stringify({ mcpServers: { [MCP_SERVER_NAME]: server } }, null, 2)
+  }
+
   /** Settings passed to `claude --settings`, so the hooks apply only to sessions the app launched. */
   settingsJson(): string {
     const hook = {
@@ -122,7 +171,9 @@ export class HookServer {
     }
     const hooks: Record<string, unknown> = {}
     for (const event of EVENTS) hooks[event] = [{ hooks: [hook] }]
-    return JSON.stringify({ hooks }, null, 2)
+    // The step tools only touch this session's job state, so they don't need a prompt each time.
+    const allow = TOOLS.map((t) => `mcp__${MCP_SERVER_NAME}__${t.name}`)
+    return JSON.stringify({ hooks, permissions: { allow } }, null, 2)
   }
 }
 

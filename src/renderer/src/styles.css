@@ -926,3 +926,22 @@ pre.code {
   border-radius: 3px;
   padding: 0 4px;
 }
+
+.step-pending {
+  flex-basis: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid #d7ba7d;
+  border-radius: 4px;
+  background: rgba(215, 186, 125, 0.08);
+  font-size: 12px;
+  white-space: normal;
+}
+.step-pending-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.step-reason {
+  font-size: 11px;
+}

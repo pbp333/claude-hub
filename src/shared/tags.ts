@@ -29,5 +29,9 @@ export function effectiveTags(session: Session, tags: Tag[]): { tag: Tag; source
 
 /** Sessions that want the user: blocked on a prompt, or finished and not yet looked at. */
 export function needsAttention(session: Session): boolean {
-  return session.attentionState === 'needs-you' || (session.attentionState === 'done' && session.unread)
+  return (
+    session.attentionState === 'needs-you' ||
+    (session.attentionState === 'done' && session.unread) ||
+    (!!session.pendingStep && !session.archived)
+  )
 }

@@ -535,6 +535,7 @@ function registerIpc(): void {
   on('toggle-tag', (_e, id, tagId) => manager.toggleTag(str(id), str(tagId)))
   on('next-step', (_e, id) => manager.nextStep(str(id)))
   on('set-step', (_e, id, stepId) => manager.setStep(str(id), str(stepId)))
+  on('reject-step', (_e, id) => manager.rejectPendingStep(str(id)))
 
   on('pty-write', (_e, id, data) => manager.write(str(id), str(data, 1024 * 1024)))
   on('pty-resize', (_e, id, cols, rows) => manager.resize(str(id), int(cols), int(rows)))

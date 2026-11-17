@@ -49,7 +49,11 @@ export interface Rule {
   enabled: boolean
 }
 
-export type AdvanceOn = 'manual' | 'stop' | { github: PrCondition }
+/**
+ * Who closes a step: the user (manual), the end of Claude's turn (stop), a PR condition
+ * (github), or Claude itself through the hub's complete_step tool (claude).
+ */
+export type AdvanceOn = 'manual' | 'stop' | 'claude' | { github: PrCondition }
 
 export interface JobStep {
   id: string
@@ -57,6 +61,8 @@ export interface JobStep {
   prompt?: string
   autoSend?: boolean
   advanceOn?: AdvanceOn
+  /** With advanceOn "claude": Claude's completion waits for the user to accept it. */
+  confirm?: boolean
   /** Tag id or name set while the session is on this step. */
   tag?: string
 }
@@ -70,6 +76,15 @@ export interface JobType {
 export interface StepEntry {
   stepId: string
   enteredAt: string
+  /** Why the previous step ended, e.g. Claude's note when it completed it. */
+  reason?: string
+}
+
+/** Claude said a step is done; the step has confirm set, so it waits for the user. */
+export interface PendingStep {
+  stepId: string
+  note?: string
+  at: string
 }
 
 export interface PrInfo {
@@ -121,6 +136,7 @@ export interface Session {
   steps?: JobStep[]
   currentStepId?: string
   stepHistory: StepEntry[]
+  pendingStep?: PendingStep
   createdAt: string
   updatedAt: string
   lastActivityAt: string

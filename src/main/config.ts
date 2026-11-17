@@ -70,7 +70,7 @@ export const DEFAULT_JOB_TYPES: JobType[] = [
     name: 'Feature',
     steps: [
       { id: 'plan', name: 'Plan', prompt: "Read the task and propose a plan. Don't write code yet.", advanceOn: 'manual' },
-      { id: 'implement', name: 'Implement', prompt: 'Implement the agreed plan, with tests.', advanceOn: 'manual' },
+      { id: 'implement', name: 'Implement', prompt: 'Implement the agreed plan, with tests.', advanceOn: 'claude' },
       { id: 'pr', name: 'Open PR', prompt: 'Commit, push and open a PR.', advanceOn: { github: 'prOpen' } },
       { id: 'review', name: 'Review', advanceOn: { github: 'approved' }, tag: 'waiting-review' },
       { id: 'done', name: 'Done' }
@@ -80,8 +80,8 @@ export const DEFAULT_JOB_TYPES: JobType[] = [
     id: 'bugfix',
     name: 'Bug fix',
     steps: [
-      { id: 'reproduce', name: 'Reproduce', prompt: 'Reproduce the bug with a failing test first.', advanceOn: 'stop' },
-      { id: 'fix', name: 'Fix', prompt: 'Fix the bug so the test passes.', advanceOn: 'manual' },
+      { id: 'reproduce', name: 'Reproduce', prompt: 'Reproduce the bug with a failing test first.', advanceOn: 'claude', autoSend: true },
+      { id: 'fix', name: 'Fix', prompt: 'Fix the bug so the test passes.', advanceOn: 'claude', confirm: true },
       { id: 'pr', name: 'Open PR', prompt: 'Commit, push and open a PR.', advanceOn: { github: 'prOpen' } },
       { id: 'done', name: 'Done' }
     ]
@@ -253,9 +253,11 @@ export function validateJobTypes(value: unknown): string[] {
         advance === undefined ||
         advance === 'manual' ||
         advance === 'stop' ||
+        advance === 'claude' ||
         (isObject(advance) && PR_CONDITIONS.includes(advance.github as PrCondition))
       if (!validAdvance)
-        problems.push(`${at}: "advanceOn" must be "manual", "stop" or { "github": one of ${PR_CONDITIONS.join(', ')} }`)
+        problems.push(`${at}: "advanceOn" must be "manual", "stop", "claude" or { "github": one of ${PR_CONDITIONS.join(', ')} }`)
+      if (step.confirm !== undefined && typeof step.confirm !== 'boolean') problems.push(`${at}: "confirm" must be true or false`)
       return undefined
     })
     return undefined

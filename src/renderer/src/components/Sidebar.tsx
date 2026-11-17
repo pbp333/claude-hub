@@ -251,10 +251,11 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
         )}
         {step && s.steps && (
           <div className="session-step">
-            <span>
+            <span title={step.advanceOn === 'claude' ? 'Claude closes this step when its goal is met' : undefined}>
               {s.jobTypeName} · {stepIndex + 1}/{s.steps.length} {step.name}
+              {step.advanceOn === 'claude' && <span className="muted"> · auto</span>}
             </span>
-            {!isLast && (
+            {!isLast && !s.pendingStep && (
               <button
                 className="step-next"
                 title="Next step"
@@ -269,6 +270,21 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
             <div className="progress">
               <div style={{ width: `${((stepIndex + 1) / s.steps.length) * 100}%` }} />
             </div>
+            {s.pendingStep && (
+              <div className="step-pending" onClick={(e) => e.stopPropagation()}>
+                <div>
+                  Claude says <b>{step.name}</b> is done{s.pendingStep.note ? `: ${s.pendingStep.note}` : '.'}
+                </div>
+                <div className="step-pending-actions">
+                  <button className="primary" onClick={() => window.hub.nextStep(s.id)} title="Move to the next step">
+                    Accept
+                  </button>
+                  <button onClick={() => window.hub.rejectStep(s.id)} title="Stay on this step and tell Claude why">
+                    Not yet
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
         {tags.length > 0 && (

@@ -125,7 +125,7 @@ function StepTimeline({ session }: { session: Session }) {
         const next = session.stepHistory[i + 1]?.enteredAt ?? session.closedAt ?? new Date().toISOString()
         const minutes = Math.max(0, Math.round((new Date(next).getTime() - new Date(h.enteredAt).getTime()) / 60000))
         return (
-          <span key={i} className="step-chip">
+          <span key={i} className="step-chip" title={session.stepHistory[i + 1]?.reason ? `Ended: ${session.stepHistory[i + 1].reason}` : undefined}>
             {names.get(h.stepId) ?? h.stepId} <span className="muted">{minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`}</span>
           </span>
         )

@@ -19,6 +19,7 @@ import { isInside } from './files'
 import { currentBranch, fetchPr, findRepos, repoFor, toPosix } from './git'
 import { HookServer, isClaudeSessionId, shouldNotify, showsDialog, stateForEvent, type HookEvent } from './hooks'
 import { PtyManager } from './pty'
+import { completedText, decideCompletion, jobStatus, stepContext, type ToolResult } from './stepTools'
 import type { JsonStore } from './store'
 
 /** What the session manager needs from the Electron side. */
@@ -81,7 +82,10 @@ export class SessionManager {
     this.projects = store.readState<Project[]>('projects.json', [], Array.isArray)
     this.recentFolders = store.readState<string[]>('recent.json', [], Array.isArray)
     this.sessions = store.readState<Session[]>('sessions.json', [], Array.isArray).map(migrateSession)
-    this.hooks = new HookServer((e) => this.onHook(e))
+    this.hooks = new HookServer({
+      onEvent: (e) => this.onHook(e),
+      onTool: (key, name, args) => this.onStepTool(key, name, args)
+    })
     this.ptys = new PtyManager(
       (id, data) => this.onPtyData(id, data),
       (id, code) => this.onPtyExit(id, code)
@@ -92,6 +96,7 @@ export class SessionManager {
   async start(openProjectIds: string[]): Promise<void> {
     await this.hooks.start()
     this.store.write('hub-hooks.json', JSON.parse(this.hooks.settingsJson()))
+    this.store.write('hub-mcp.json', JSON.parse(this.hooks.mcpConfigJson()))
     const wasRunning = new Set(this.sessions.filter((s) => s.running && !s.archived).map((s) => s.id))
     for (const s of this.sessions) {
       s.running = false
@@ -321,7 +326,8 @@ export class SessionManager {
         return
       }
       const claudeArgs = [...settings.claudeArgs]
-      if (settings.hooksEnabled) claudeArgs.push('--settings', this.store.path('hub-hooks.json'))
+      if (settings.hooksEnabled)
+        claudeArgs.push('--settings', this.store.path('hub-hooks.json'), '--mcp-config', this.store.path('hub-mcp.json'))
       if (resume && session.claudeSessionId && isClaudeSessionId(session.claudeSessionId))
         claudeArgs.push('--resume', session.claudeSessionId)
       // .cmd shims can't be spawned directly on Windows; cmd.exe gets one escaped command line.
@@ -432,14 +438,19 @@ export class SessionManager {
 
   // ---- hook events -----------------------------------------------------
 
-  private onHook(event: HookEvent): void {
+  /** The session whose current process has this spawn key; a replaced process gets nothing. */
+  private sessionForKey(key: string): Session | undefined {
+    const dot = key.lastIndexOf('.')
+    const id = key.slice(0, dot)
+    if (dot < 0 || `${id}.${this.generations.get(id)}` !== key) return undefined
+    return this.get(id)
+  }
+
+  /** Handles a hook event; returns the hook's reply (context added to the prompt), if any. */
+  private onHook(event: HookEvent): object | undefined {
     if (debug) console.log(`[hook] ${event.name} ${event.hubSessionId}`)
-    const dot = event.hubSessionId.lastIndexOf('.')
-    const id = event.hubSessionId.slice(0, dot)
-    // Only the current process of a session counts; a late event from a replaced one is dropped.
-    if (dot < 0 || `${id}.${this.generations.get(id)}` !== event.hubSessionId) return
-    const s = this.get(id)
-    if (!s) return
+    const s = this.sessionForKey(event.hubSessionId)
+    if (!s) return undefined
     // Claude's session id ends up on the command line (--resume), so take only real ids.
     const raw = event.payload.session_id
     const claudeId = typeof raw === 'string' && isClaudeSessionId(raw) ? raw : undefined
@@ -470,6 +481,43 @@ export class SessionManager {
       void this.refreshBranches(s.id)
       this.schedulePrCheck(s.id, 3000)
     }
+    if (event.name === 'UserPromptSubmit') {
+      const context = stepContext(s)
+      if (context) return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context } }
+    }
+    return undefined
+  }
+
+  /** The job_status and complete_step tools, called by Claude through the hub's MCP server. */
+  private onStepTool(key: string, name: string, args: Record<string, unknown>): ToolResult {
+    const s = this.sessionForKey(key)
+    if (!s) return { text: 'This Claude process is no longer managed by Claude Hub.', isError: true }
+    if (name === 'job_status') return { text: jobStatus(s) }
+    const decision = decideCompletion(s, args)
+    if (!decision.ok) return { text: decision.message, isError: true }
+    const { step, next, note } = decision
+    if (decision.confirm) {
+      this.update(s.id, (x) => (x.pendingStep = { stepId: step.id, note, at: new Date().toISOString() }))
+      this.host.notify(s, `Claude says "${step.name}" is done${note ? `: ${note}` : ''}. Accept it to move on.`)
+      return {
+        text: `Asked the user to accept step "${step.name}" as done. Stop here and wait; you'll get the next step's instructions once they accept.`
+      }
+    }
+    if (!next) return { text: completedText(step, undefined, false) }
+    // The next step's goal goes back in the tool result, so Claude carries on in the same turn
+    // instead of the prompt being typed in while it's still working.
+    const continueNow = !!next.autoSend && !!next.prompt
+    this.setStep(s.id, next.id, `Claude finished "${step.name}"${note ? ` (${note})` : ''}`, { promptInResult: continueNow })
+    return { text: completedText(step, next, continueNow) }
+  }
+
+  /** The user didn't accept Claude's "step done": stay on the step and let them say why. */
+  rejectPendingStep(id: string): void {
+    const s = this.get(id)
+    const step = s && currentStep(s)
+    if (!s?.pendingStep || !step) return
+    this.update(id, (x) => (x.pendingStep = undefined))
+    if (s.running) this.deliverPrompt(s, `Step "${step.name}" isn't done yet: `, false)
   }
 
   /**
@@ -559,6 +607,7 @@ export class SessionManager {
     s.jobTypeName = job.name
     s.steps = structuredClone(job.steps)
     s.currentStepId = job.steps[0].id
+    s.pendingStep = undefined
     s.stepHistory = [{ stepId: job.steps[0].id, enteredAt: new Date().toISOString() }]
   }
 
@@ -567,7 +616,7 @@ export class SessionManager {
     this.update(id, (s) => {
       if (job) this.applyJob(s, job)
       else {
-        s.jobTypeId = s.jobTypeName = s.steps = s.currentStepId = undefined
+        s.jobTypeId = s.jobTypeName = s.steps = s.currentStepId = s.pendingStep = undefined
         s.stepHistory = []
       }
     })
@@ -580,20 +629,26 @@ export class SessionManager {
     const s = this.get(id)
     if (!s?.steps) return
     const i = s.steps.findIndex((st) => st.id === s.currentStepId)
+    // Accepting Claude's "done" on the last step just clears it.
+    if (i === s.steps.length - 1 && s.pendingStep) this.update(id, (x) => (x.pendingStep = undefined))
     if (i < 0 || i >= s.steps.length - 1) return
     this.setStep(id, s.steps[i + 1].id, reason)
   }
 
-  setStep(id: string, stepId: string, reason?: string): void {
+  setStep(id: string, stepId: string, reason?: string, opts: { promptInResult?: boolean } = {}): void {
     const s = this.get(id)
     const step = s?.steps?.find((st) => st.id === stepId)
     if (!s || !step || s.currentStepId === stepId) return
+    // Moving on from a step Claude reported done is the user accepting it.
+    const pending = s.pendingStep?.stepId === s.currentStepId ? s.pendingStep : undefined
+    const why = reason ?? (pending ? `Accepted: Claude finished it${pending.note ? ` (${pending.note})` : ''}` : undefined)
     this.update(id, (x) => {
       x.currentStepId = stepId
-      x.stepHistory.push({ stepId, enteredAt: new Date().toISOString() })
+      x.pendingStep = undefined
+      x.stepHistory.push({ stepId, enteredAt: new Date().toISOString(), ...(why ? { reason: why } : {}) })
     })
     if (reason) this.host.notify(s, `${reason}: moved to "${step.name}"`)
-    if (s.running && step.prompt) {
+    if (s.running && step.prompt && !opts.promptInResult) {
       this.deliverPrompt(s, step.prompt, !!step.autoSend)
     }
     // A step waiting on GitHub may already be satisfied.

@@ -19,6 +19,8 @@ export interface HubApi {
   toggleTag(id: string, tagId: string): void
   nextStep(id: string): void
   setStep(id: string, stepId: string): void
+  /** Turns down Claude's report that the current step is done. */
+  rejectStep(id: string): void
   ptyWrite(id: string, data: string): void
   ptyResize(id: string, cols: number, rows: number): void
   ptyBuffer(id: string): Promise<string>

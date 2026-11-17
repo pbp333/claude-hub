@@ -22,7 +22,13 @@ function post(port: number, headers: Record<string, string>, body = '{"hook_even
 
 test('hook server accepts only a registered session with its own token', async () => {
   const events: HookEvent[] = []
-  const server = new HookServer((e) => events.push(e))
+  const server = new HookServer({
+    onEvent: (e) => {
+      events.push(e)
+      return undefined
+    },
+    onTool: () => ({ text: '' })
+  })
   await server.start()
   try {
     const a = server.register('a.1')

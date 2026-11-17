@@ -101,7 +101,14 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
                 {s.advanceOn && s.advanceOn !== 'manual' && (
                   <span className="muted">
                     {' '}
-                    · moves on {s.advanceOn === 'stop' ? 'when Claude finishes' : `on GitHub: ${s.advanceOn.github}`}
+                    ·{' '}
+                    {s.advanceOn === 'stop'
+                      ? 'moves on when Claude finishes'
+                      : s.advanceOn === 'claude'
+                        ? s.confirm
+                          ? 'Claude marks it done, you accept'
+                          : 'Claude marks it done'
+                        : `moves on on GitHub: ${s.advanceOn.github}`}
                   </span>
                 )}
               </li>
