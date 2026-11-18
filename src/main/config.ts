@@ -1,4 +1,4 @@
-import type { ConfigError, JobType, PrCondition, Rule, Settings, Tag } from '../shared/types'
+import type { ConfigError, PrCondition, Rule, Settings, Tag } from '../shared/types'
 import type { JsonStore } from './store'
 
 export const PR_CONDITIONS: PrCondition[] = [
@@ -64,39 +64,14 @@ export const DEFAULT_RULES: Rule[] = [
   { id: 'merged', when: 'merged', setTag: 'merged', enabled: true }
 ]
 
-export const DEFAULT_JOB_TYPES: JobType[] = [
-  {
-    id: 'feature',
-    name: 'Feature',
-    steps: [
-      { id: 'plan', name: 'Plan', prompt: "Read the task and propose a plan. Don't write code yet.", advanceOn: 'manual' },
-      { id: 'implement', name: 'Implement', prompt: 'Implement the agreed plan, with tests.', advanceOn: 'claude' },
-      { id: 'pr', name: 'Open PR', prompt: 'Commit, push and open a PR.', advanceOn: { github: 'prOpen' } },
-      { id: 'review', name: 'Review', advanceOn: { github: 'approved' }, tag: 'waiting-review' },
-      { id: 'done', name: 'Done' }
-    ]
-  },
-  {
-    id: 'bugfix',
-    name: 'Bug fix',
-    steps: [
-      { id: 'reproduce', name: 'Reproduce', prompt: 'Reproduce the bug with a failing test first.', advanceOn: 'claude', autoSend: true },
-      { id: 'fix', name: 'Fix', prompt: 'Fix the bug so the test passes.', advanceOn: 'claude', confirm: true },
-      { id: 'pr', name: 'Open PR', prompt: 'Commit, push and open a PR.', advanceOn: { github: 'prOpen' } },
-      { id: 'done', name: 'Done' }
-    ]
-  }
-]
-
 export interface LoadedConfig {
   settings: Settings
   tags: Tag[]
   rules: Rule[]
-  jobTypes: JobType[]
   errors: ConfigError[]
 }
 
-export const CONFIG_FILES = ['settings.json', 'tags.json', 'rules.json', 'jobTypes.json']
+export const CONFIG_FILES = ['settings.json', 'tags.json', 'rules.json']
 
 /** Loads every config file, writing defaults for missing ones. Invalid files keep the defaults and report an error. */
 export function loadConfig(store: JsonStore): LoadedConfig {
@@ -128,8 +103,7 @@ export function loadConfig(store: JsonStore): LoadedConfig {
   for (const message of problems) errors.push({ file: 'settings.json', message })
   const tags = load('tags.json', DEFAULT_TAGS, validateTags)
   const rules = load('rules.json', DEFAULT_RULES, validateRules)
-  const jobTypes = load('jobTypes.json', DEFAULT_JOB_TYPES, validateJobTypes)
-  return { settings, tags, rules, jobTypes, errors }
+  return { settings, tags, rules, errors }
 }
 
 export const MIN_POLL_INTERVAL_SEC = 15
@@ -221,48 +195,3 @@ export function validateRules(value: unknown): string[] {
   return problems
 }
 
-export function validateJobTypes(value: unknown): string[] {
-  if (!Array.isArray(value)) return ['must be a list of job types']
-  const problems: string[] = []
-  const ids = new Set<string>()
-  value.forEach((job, i) => {
-    const where = isObject(job) && isNonEmptyString(job.id) ? `job type "${job.id}"` : `job type ${i + 1}`
-    if (!isObject(job)) return problems.push(`${where}: must be an object`)
-    if (!isNonEmptyString(job.id)) problems.push(`${where}: "id" is required`)
-    else if (ids.has(job.id)) problems.push(`${where}: duplicate id`)
-    else ids.add(job.id)
-    if (!isNonEmptyString(job.name)) problems.push(`${where}: "name" is required`)
-    if (!Array.isArray(job.steps) || job.steps.length === 0) {
-      problems.push(`${where}: "steps" must be a non-empty list`)
-      return undefined
-    }
-    const stepIds = new Set<string>()
-    job.steps.forEach((step: unknown, j: number) => {
-      const at = `${where}, step ${j + 1}`
-      if (!isObject(step)) return problems.push(`${at}: must be an object`)
-      if (!isNonEmptyString(step.id)) problems.push(`${at}: "id" is required`)
-      else if (stepIds.has(step.id)) problems.push(`${at}: duplicate step id "${step.id}"`)
-      else stepIds.add(step.id)
-      if (!isNonEmptyString(step.name)) problems.push(`${at}: "name" is required`)
-      if (step.prompt !== undefined && typeof step.prompt !== 'string') problems.push(`${at}: "prompt" must be text`)
-      if (step.autoSend !== undefined && typeof step.autoSend !== 'boolean')
-        problems.push(`${at}: "autoSend" must be true or false`)
-      if (step.tag !== undefined && !isNonEmptyString(step.tag)) problems.push(`${at}: "tag" must be a tag id or name`)
-      const advance = step.advanceOn
-      const validAdvance =
-        advance === undefined ||
-        advance === 'manual' ||
-        advance === 'stop' ||
-        advance === 'claude' ||
-        (isObject(advance) && PR_CONDITIONS.includes(advance.github as PrCondition))
-      if (!validAdvance)
-        problems.push(`${at}: "advanceOn" must be "manual", "stop", "claude" or { "github": one of ${PR_CONDITIONS.join(', ')} }`)
-      if (step.skill !== undefined && !(typeof step.skill === 'string' && /^[\w.-]+(:[\w.-]+)?$/.test(step.skill)))
-        problems.push(`${at}: "skill" must be a skill name like "build-apk" or "plugin:skill" (no slash)`)
-      if (step.confirm !== undefined && typeof step.confirm !== 'boolean') problems.push(`${at}: "confirm" must be true or false`)
-      return undefined
-    })
-    return undefined
-  })
-  return problems
-}

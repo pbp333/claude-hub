@@ -3,6 +3,7 @@ import type { IpcMainEvent, IpcMainInvokeEvent, MenuItemConstructorOptions, Rect
 import { watch, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { clampStep, MAX_STEPS, parseStepsInput, stepName } from '../shared/steps'
 import { effectiveTags } from '../shared/tags'
 import type { NewSessionOptions, Session, UiCommand, WindowInfo } from '../shared/types'
 import { CONFIG_FILES } from './config'
@@ -291,7 +292,7 @@ async function pickFolder(target?: HubWindow): Promise<void> {
 function buildMenu(): void {
   menuKey = manager.recentFolders.join('\0')
   const kb = manager.config.settings.keybindings
-  const item = (label: string, accelerator: string, cmd: UiCommand): MenuItemConstructorOptions => ({
+  const item = (label: string, accelerator: string | undefined, cmd: UiCommand): MenuItemConstructorOptions => ({
     label,
     accelerator,
     click: () => command(cmd)
@@ -351,6 +352,7 @@ function buildMenu(): void {
       submenu: [
         item('Next Session That Needs Me', kb.nextNeedsYou, { type: 'nextNeedsYou' }),
         item('Next Step', kb.nextStep, { type: 'nextStep' }),
+        item('Edit Steps…', undefined, { type: 'editSteps' }),
         { type: 'separator' },
         ...switchItems,
         ...(tagItems.length ? [{ type: 'separator' as const }, ...tagItems] : [])
@@ -388,32 +390,29 @@ function sessionContextMenu(sessionId: string, hw: HubWindow): void {
     if (group) tagMenu.push({ label: group, enabled: false })
     tagMenu.push(...items)
   }
-  const stepMenu: MenuItemConstructorOptions[] = (s.steps ?? []).map((st, i) => ({
-    label: `${i + 1}. ${st.name}`,
-    type: 'radio',
-    checked: st.id === s.currentStepId,
-    click: () => manager.setStep(sessionId, st.id)
-  }))
-  const jobMenu: MenuItemConstructorOptions[] = [
-    { label: 'None', type: 'radio', checked: !s.jobTypeId, click: () => manager.setJobType(sessionId, undefined) },
-    ...manager.config.jobTypes.map(
-      (j): MenuItemConstructorOptions => ({
-        label: j.name,
+  const steps = s.steps ?? []
+  const current = clampStep(steps, s.currentStep)
+  const stepMenu: MenuItemConstructorOptions[] = [
+    ...steps.map(
+      (_, i): MenuItemConstructorOptions => ({
+        label: `${i + 1}. ${stepName(steps, i)}`,
         type: 'radio',
-        checked: s.jobTypeId === j.id,
-        click: () => manager.setJobType(sessionId, j.id)
+        checked: i === current,
+        click: () => manager.goToStep(sessionId, i)
       })
-    )
+    ),
+    { label: 'All done', type: 'radio', checked: current >= steps.length, click: () => manager.goToStep(sessionId, steps.length) }
   ]
   const prItems: MenuItemConstructorOptions[] = s.repos
     .filter((r) => r.pr)
     .map((r) => ({ label: `Open PR #${r.pr!.number} (${r.name})`, click: () => void shell.openExternal(r.pr!.url) }))
   const template: MenuItemConstructorOptions[] = [
     { label: 'Tags', submenu: tagMenu },
-    ...(s.kind === 'claude' ? [{ label: 'Job type', submenu: jobMenu }] : []),
-    ...(stepMenu.length
+    { label: steps.length ? 'Edit steps…' : 'Add steps…', click: () => command({ type: 'editSteps', sessionId }, hw) },
+    ...(steps.length
       ? [
-          { label: 'Next step', click: () => manager.nextStep(sessionId) },
+          { label: 'Next step', click: () => manager.moveStep(sessionId, 1) },
+          { label: 'Previous step', click: () => manager.moveStep(sessionId, -1) },
           { label: 'Go to step', submenu: stepMenu }
         ]
       : []),
@@ -462,6 +461,12 @@ class IpcError extends Error {}
 const str = (v: unknown, max = 4096): string => {
   if (typeof v !== 'string' || v.length > max) throw new IpcError('expected text')
   return v
+}
+/** A step list from the renderer: up to MAX_STEPS names (empty names for a plain count). */
+const stepList = (v: unknown): string[] | undefined => {
+  if (v === undefined) return undefined
+  if (!Array.isArray(v) || v.length > MAX_STEPS) throw new IpcError('expected a list of steps')
+  return v.map((x) => str(x, 1000))
 }
 const int = (v: unknown): number => {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 10000) throw new IpcError('expected a number')
@@ -524,7 +529,7 @@ function registerIpc(): void {
       projectId: str(o.projectId),
       name: o.name === undefined ? undefined : str(o.name, 200),
       kind,
-      jobTypeId: o.jobTypeId === undefined ? undefined : str(o.jobTypeId, 200)
+      steps: stepList(o.steps)
     } satisfies NewSessionOptions)
     return session.id
   })
@@ -546,9 +551,9 @@ function registerIpc(): void {
     if (hw.activeSessionId && hw.win.isFocused()) manager.markRead(hw.activeSessionId)
   })
   on('toggle-tag', (_e, id, tagId) => manager.toggleTag(str(id), str(tagId)))
-  on('next-step', (_e, id) => manager.nextStep(str(id)))
-  on('set-step', (_e, id, stepId) => manager.setStep(str(id), str(stepId)))
-  on('reject-step', (_e, id) => manager.rejectPendingStep(str(id)))
+  on('set-steps', (_e, id, steps) => manager.setSteps(str(id), stepList(steps) ?? []))
+  on('move-step', (_e, id, direction) => manager.moveStep(str(id), str(direction) === 'back' ? -1 : 1))
+  on('go-to-step', (_e, id, index) => manager.goToStep(str(id), int(index)))
 
   on('pty-write', (_e, id, data) => manager.write(str(id), str(data, 1024 * 1024)))
   on('pty-resize', (_e, id, cols, rows) => manager.resize(str(id), int(cols), int(rows)))
@@ -611,7 +616,7 @@ function registerIpc(): void {
   })
 }
 
-/** Reload tags, rules, job types and settings when their files change (also when edited inside the app). */
+/** Reload tags, rules and settings when their files change (also when edited inside the app). */
 function watchConfig(): void {
   let timer: NodeJS.Timeout | undefined
   watch(store.dir, (_event, file) => {
@@ -654,12 +659,13 @@ app.whenReady().then(async () => {
 
 /** Dev aids for testing without clicking through the UI; see the README. Unpackaged builds only. */
 async function runDevAids(): Promise<void> {
-  // CLAUDE_HUB_DEMO="claude|shell:<folder>[:jobTypeId]" opens the folder and starts a session.
+  // CLAUDE_HUB_DEMO="claude|shell:<folder>[:<steps>]" opens the folder and starts a session;
+  // steps are a count ("5") or names separated by "|".
   const demo = env('CLAUDE_HUB_DEMO')?.match(/^(claude|shell):([^:]+)(?::(.+))?$/)
   if (demo) {
     openFolderPath(demo[2], live()[0])
     const hw = live()[0]
-    const session = await manager.create({ projectId: hw.projectId!, kind: demo[1] as 'claude' | 'shell', jobTypeId: demo[3] })
+    const session = await manager.create({ projectId: hw.projectId!, kind: demo[1] as 'claude' | 'shell', steps: demo[3] ? parseStepsInput(demo[3].replace(/\|/g, '\n')) : undefined })
     hw.win.webContents.once('did-finish-load', () => setTimeout(() => command({ type: 'focusSession', sessionId: session.id }, hw), 500))
     // CLAUDE_HUB_DEMO_OPEN="<path>:<line>" opens a file the way a terminal link click does.
     const open = env('CLAUDE_HUB_DEMO_OPEN')?.match(/^(.+):(\d+)$/)
@@ -690,7 +696,13 @@ async function runDevAids(): Promise<void> {
       } catch {
         // use as is
       }
-      setTimeout(() => manager.write(session.id, text), Number(env('CLAUDE_HUB_DEMO_INPUT_DELAY') ?? 2500))
+      // A trailing Enter goes separately, as typing does; sent with the text, the CLI's
+      // slash-command menu can swallow it.
+      const enter = text.endsWith('\r')
+      setTimeout(() => {
+        manager.write(session.id, enter ? text.slice(0, -1) : text)
+        if (enter) setTimeout(() => manager.write(session.id, '\r'), 800)
+      }, Number(env('CLAUDE_HUB_DEMO_INPUT_DELAY') ?? 2500))
     }
   }
   // CLAUDE_HUB_SCREENSHOT=/path.png captures the first window after a delay and quits.

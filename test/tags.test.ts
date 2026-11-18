@@ -18,17 +18,11 @@ function session(over: Partial<Session> = {}): Session {
   }
 }
 
-test('combines manual, rule and step tags without duplicates', () => {
-  const s = session({
-    tagIds: ['blocked'],
-    autoTags: ['pr-open', 'blocked'],
-    steps: [{ id: 'review', name: 'Review', tag: 'Waiting review' }],
-    currentStepId: 'review'
-  })
+test('combines manual and rule tags without duplicates', () => {
+  const s = session({ tagIds: ['blocked'], autoTags: ['pr-open', 'blocked'] })
   assert.deepEqual(effectiveTags(s, tags).map((t) => [t.tag.id, t.source]), [
     ['blocked', 'manual'],
-    ['pr-open', 'auto'],
-    ['waiting-review', 'step']
+    ['pr-open', 'auto']
   ])
 })
 

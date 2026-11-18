@@ -1,7 +1,11 @@
 import { create } from 'zustand'
 import type { HubState, Project, Session } from '../../shared/types'
 
-type Dialog = { type: 'newSession' } | { type: 'rename'; sessionId: string } | { type: 'palette'; mode: 'files' | 'commands' }
+type Dialog =
+  | { type: 'newSession' }
+  | { type: 'rename'; sessionId: string }
+  | { type: 'steps'; sessionId?: string }
+  | { type: 'palette'; mode: 'files' | 'commands' }
 
 interface UiState {
   hub?: HubState

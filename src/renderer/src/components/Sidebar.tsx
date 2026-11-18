@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { currentStep, effectiveTags, needsAttention } from '../../../shared/tags'
+import { clampStep, progressLabel, stepName } from '../../../shared/steps'
+import { effectiveTags, needsAttention } from '../../../shared/tags'
 import type { AttentionState, HubState, Session } from '../../../shared/types'
 import { useProject, useUi } from '../store'
 import { HistoryList } from './History'
@@ -37,8 +38,7 @@ function groupSessions(hub: HubState, sessions: Session[], groupBy: GroupBy): [s
   for (const s of sessions) {
     if (groupBy === 'repo') add(s.repos.map((r) => r.name).join(', ') || 'No repo yet', s)
     else if (groupBy === 'step') {
-      const step = currentStep(s)
-      add(step ? `${s.jobTypeName} · ${step.name}` : 'No job type', s)
+      add(progressLabel(s) ?? 'No steps', s)
     } else {
       const tag = effectiveTags(s, hub.tags).find((t) => t.tag.group === groupBy)
       add(tag?.tag.name ?? `No ${groupBy}`, s)
@@ -84,7 +84,7 @@ export function Sidebar() {
       if (quick.startsWith('tag:') && !tags.some((t) => t.tag.id === quick.slice(4))) return false
       if (!text) return true
       const repos = s.repos.flatMap((r) => [r.name, r.branch ?? ''])
-      const haystack = [s.name, ...repos, currentStep(s)?.name ?? '', ...tags.map((t) => t.tag.name)]
+      const haystack = [s.name, ...repos, progressLabel(s) ?? '', ...tags.map((t) => t.tag.name)]
       return haystack.join(' ').toLowerCase().includes(text)
     })
     return groupSessions(hub, sortSessions(visible), groupBy)
@@ -213,10 +213,9 @@ function prForTag(hub: HubState, s: Session, tagId: string): string | undefined 
 }
 
 function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; session: Session; active: boolean; overlaps?: string[] }) {
-  const step = currentStep(s)
-  const stepIndex = s.steps && step ? s.steps.indexOf(step) : -1
   const tags = effectiveTags(s, hub.tags)
-  const isLast = s.steps ? stepIndex === s.steps.length - 1 : true
+  const steps = s.steps ?? []
+  const current = clampStep(steps, s.currentStep)
 
   return (
     <div
@@ -249,44 +248,42 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
             ⚠ Shared: {overlaps.join('; ')}
           </div>
         )}
-        {step && s.steps && (
-          <div className="session-step">
-            <span title={step.advanceOn === 'claude' ? 'Claude closes this step when its goal is met' : undefined}>
-              {s.jobTypeName} · {stepIndex + 1}/{s.steps.length} {step.name}
-              {step.skill && <span className="muted"> · /{step.skill}</span>}
-              {step.advanceOn === 'claude' && <span className="muted"> · auto</span>}
+        {steps.length > 0 ? (
+          <div className="session-step" onClick={(e) => e.stopPropagation()}>
+            <span className="step-label" title="Edit steps" onClick={() => useUi.getState().openDialog({ type: 'steps', sessionId: s.id })}>
+              {progressLabel(s)}
             </span>
-            {!isLast && !s.pendingStep && (
-              <button
-                className="step-next"
-                title="Next step"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  window.hub.nextStep(s.id)
-                }}
-              >
-                Next ›
+            <span className="step-buttons">
+              <button title="Previous step" disabled={current === 0} onClick={() => window.hub.moveStep(s.id, 'back')}>
+                ‹
               </button>
-            )}
-            <div className="progress">
-              <div style={{ width: `${((stepIndex + 1) / s.steps.length) * 100}%` }} />
+              <button title="Next step" disabled={current >= steps.length} onClick={() => window.hub.moveStep(s.id, 'next')}>
+                ›
+              </button>
+            </span>
+            <div className="step-segments">
+              {steps.map((_, i) => (
+                <button
+                  key={i}
+                  className={i < current ? 'done' : i === current ? 'current' : ''}
+                  title={`${i + 1}. ${stepName(steps, i)}`}
+                  onClick={() => window.hub.goToStep(s.id, i === current ? i + 1 : i)}
+                />
+              ))}
             </div>
-            {s.pendingStep && (
-              <div className="step-pending" onClick={(e) => e.stopPropagation()}>
-                <div>
-                  Claude says <b>{step.name}</b> is done{s.pendingStep.note ? `: ${s.pendingStep.note}` : '.'}
-                </div>
-                <div className="step-pending-actions">
-                  <button className="primary" onClick={() => window.hub.nextStep(s.id)} title="Move to the next step">
-                    Accept
-                  </button>
-                  <button onClick={() => window.hub.rejectStep(s.id)} title="Stay on this step and tell Claude why">
-                    Not yet
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
+        ) : (
+          s.kind === 'claude' && (
+            <button
+              className="add-steps"
+              onClick={(e) => {
+                e.stopPropagation()
+                useUi.getState().openDialog({ type: 'steps', sessionId: s.id })
+              }}
+            >
+              + steps
+            </button>
+          )
         )}
         {tags.length > 0 && (
           <div className="session-tags">
@@ -295,7 +292,7 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
                 key={tag.id}
                 className={`tag ${source}`}
                 style={{ borderColor: tag.color, color: tag.color }}
-                title={source === 'auto' ? 'From GitHub, click to open the PR' : source === 'step' ? 'Set by the current step' : 'Manual tag'}
+                title={source === 'auto' ? 'From GitHub, click to open the PR' : 'Manual tag'}
                 onClick={(e) => {
                   const url = source === 'auto' ? prForTag(hub, s, tag.id) : undefined
                   if (url) {

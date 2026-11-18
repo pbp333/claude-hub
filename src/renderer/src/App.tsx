@@ -110,12 +110,14 @@ function handleCommand(cmd: UiCommand): void {
       return ui.setSidebarTab(ui.sidebarTab === 'history' ? 'sessions' : 'history')
     case 'openTranscript':
       return openTranscript(cmd.claudeSessionId, cmd.title)
+    case 'editSteps':
+      return ui.openDialog({ type: 'steps', sessionId: cmd.sessionId })
     case 'closeTab':
       return closeActivePanel()
     case 'nextNeedsYou':
       return goToNextNeedsYou()
     case 'nextStep':
-      if (ui.activeSessionId) window.hub.nextStep(ui.activeSessionId)
+      if (ui.activeSessionId) window.hub.moveStep(ui.activeSessionId, 'next')
       return
     case 'focusSession':
       return openSession(cmd.sessionId)

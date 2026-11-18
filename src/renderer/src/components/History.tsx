@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { progressLabel } from '../../../shared/steps'
 import { effectiveTags } from '../../../shared/tags'
 import type { HistoryItem, Session } from '../../../shared/types'
 import { errorMessage } from '../errors'
@@ -63,7 +64,7 @@ export function HistoryList() {
     if (!items || !q) return items ?? []
     return items.filter((item) => {
       const owner = hubSessionFor(sessions, item.claudeSessionId)
-      return [item.title, item.firstPrompt ?? '', item.branch ?? '', owner?.name ?? '', owner?.jobTypeName ?? '']
+      return [item.title, item.firstPrompt ?? '', item.branch ?? '', owner?.name ?? '', (owner && progressLabel(owner)) ?? '']
         .join(' ')
         .toLowerCase()
         .includes(q)
@@ -108,7 +109,7 @@ export function HistoryList() {
               {owner && (
                 <div className="session-sub">
                   {owner.archived ? 'Closed session' : 'Session'} "{owner.name}"
-                  {owner.jobTypeName ? ` · ${owner.jobTypeName}` : ''}
+                  {progressLabel(owner) ? ` · ${progressLabel(owner)}` : ''}
                 </div>
               )}
               {tags.length > 0 && (

@@ -1,61 +1,50 @@
 import assert from 'node:assert/strict'
 import { request } from 'node:http'
 import { test } from 'node:test'
-import { validateJobTypes } from '../src/main/config.ts'
 import { HookServer } from '../src/main/hooks.ts'
-import { completedText, decideCompletion, handleRpc, jobStatus, stepContext } from '../src/main/stepTools.ts'
-import type { JobStep, Session } from '../src/shared/types.ts'
+import { applyStepTool, describeSteps, handleRpc, stepContext, type StepChange } from '../src/main/stepTools.ts'
+import { parseStepsInput, progressLabel, stepsInputText } from '../src/shared/steps.ts'
 
-const steps: JobStep[] = [
-  { id: 'plan', name: 'Plan', advanceOn: 'manual' },
-  { id: 'reproduce', name: 'Reproduce', prompt: 'Write a failing test.', advanceOn: 'claude' },
-  { id: 'fix', name: 'Fix', prompt: 'Make it pass.', advanceOn: 'claude', confirm: true, autoSend: true },
-  { id: 'pr', name: 'Open PR', advanceOn: { github: 'prOpen' } }
-]
+const plan = { steps: ['Reproduce', 'Fix', 'Test'], currentStep: 1 }
 
-function session(currentStepId?: string, extra: Partial<Session> = {}): Session {
-  const now = new Date().toISOString()
-  return {
-    id: 's1', projectId: 'p', name: 'x', kind: 'claude', cwd: '/tmp', repos: [], claudeSessionIds: [],
-    attentionState: 'working', unread: false, hookSeen: true, running: true, tagIds: [], autoTags: [],
-    stepHistory: [], createdAt: now, updatedAt: now, lastActivityAt: now,
-    ...(currentStepId ? { jobTypeId: 'bugfix', jobTypeName: 'Bug fix', steps, currentStepId } : {}),
-    ...extra
-  }
-}
-
-test('Claude can close only the current step, and only steps marked "claude"', () => {
-  assert.equal(decideCompletion(session(), { step_id: 'plan' }).ok, false, 'no job')
-  const plan = decideCompletion(session('plan'), { step_id: 'plan' })
-  assert.ok(!plan.ok && plan.message.includes('the user'), 'manual step')
-  const skip = decideCompletion(session('reproduce'), { step_id: 'fix' })
-  assert.ok(!skip.ok && skip.message.includes("can't be skipped"))
-  const pr = decideCompletion(session('pr'), { step_id: 'pr' })
-  assert.ok(!pr.ok && pr.message.includes('GitHub'))
-  const ok = decideCompletion(session('reproduce'), { step_id: 'reproduce', note: '  test added  ' })
-  assert.ok(ok.ok)
-  assert.equal(ok.next?.id, 'fix')
-  assert.equal(ok.confirm, false)
-  assert.equal(ok.note, 'test added')
-  const confirm = decideCompletion(session('fix'), { step_id: 'fix' })
-  assert.ok(confirm.ok && confirm.confirm)
-  const again = decideCompletion(session('fix', { pendingStep: { stepId: 'fix', at: '' } }), { step_id: 'fix' })
-  assert.ok(!again.ok, 'already waiting for the user')
+test('steps typed by the user: names one per line, or a count', () => {
+  assert.deepEqual(parseStepsInput(' Plan \n\n  Build it  \nShip'), ['Plan', 'Build it', 'Ship'])
+  assert.deepEqual(parseStepsInput('4'), ['', '', '', ''])
+  assert.deepEqual(parseStepsInput('500').length, 30)
+  assert.deepEqual(parseStepsInput('  '), [])
+  assert.equal(stepsInputText(['', '', '']), '3')
+  assert.equal(stepsInputText(['A', 'B']), 'A\nB')
+  assert.equal(progressLabel(plan), '2/3 Fix')
+  assert.equal(progressLabel({ steps: ['', ''], currentStep: 0 }), '1/2')
+  assert.equal(progressLabel({ steps: ['A'], currentStep: 1 }), 'Done 1/1')
+  assert.equal(progressLabel({ steps: [] }), undefined)
 })
 
-test('prompts get step context only while Claude closes the step', () => {
-  assert.equal(stepContext(session('plan')), undefined)
-  const context = stepContext(session('reproduce'))
-  assert.ok(context?.includes('step_id "reproduce"') && context.includes('Write a failing test.'))
-  assert.equal(stepContext(session('fix', { pendingStep: { stepId: 'fix', at: '' } })), undefined)
-  assert.ok(jobStatus(session('reproduce')).includes('→ reproduce: Reproduce'))
-  assert.equal(jobStatus(session()), 'This session has no job assigned.')
+test('Claude sets steps, completes them, and jumps between them', () => {
+  const set = applyStepTool({}, 'set_steps', { steps: ['Plan', ' ', 'Build'], current: 2 }) as StepChange
+  assert.deepEqual([set.steps, set.currentStep], [['Plan', 'Build'], 1])
+  assert.equal(typeof applyStepTool({}, 'set_steps', { steps: [] }), 'string')
+  assert.equal(typeof applyStepTool({}, 'set_steps', { steps: 'Plan' }), 'string')
+  assert.equal(typeof applyStepTool({}, 'complete_step', {}), 'string', 'no steps yet')
+  const done = applyStepTool(plan, 'complete_step', { note: ' fixed it ' }) as StepChange
+  assert.deepEqual([done.currentStep, done.note], [2, 'fixed it'])
+  assert.ok(done.text.includes('step 3 of 3: Test'))
+  const last = applyStepTool({ ...plan, currentStep: 2 }, 'complete_step', {}) as StepChange
+  assert.equal(last.currentStep, 3)
+  assert.ok(last.text.includes('all steps are done'))
+  assert.equal(typeof applyStepTool({ ...plan, currentStep: 3 }, 'complete_step', {}), 'string', 'already done')
+  assert.equal((applyStepTool(plan, 'set_step', { step: 1 }) as StepChange).currentStep, 0)
+  assert.equal(typeof applyStepTool(plan, 'set_step', { step: 4 }), 'string')
+  const keep = applyStepTool(plan, 'set_steps', { steps: ['A', 'B', 'C', 'D'] }) as StepChange
+  assert.equal(keep.currentStep, 1, 'keeps the current step')
 })
 
-test('the next step goal is returned when Claude should carry on', () => {
-  assert.ok(completedText(steps[1], steps[2], 'continue').includes('Its goal: Make it pass.'))
-  assert.ok(completedText(steps[1], steps[2], 'wait').includes('the user will start it'))
-  assert.ok(completedText(steps[3], undefined, 'wait').includes('last step'))
+test('prompts carry the current step while steps remain', () => {
+  assert.ok(stepContext(plan)?.includes('step 2 of 3: Fix'))
+  assert.equal(stepContext({ ...plan, currentStep: 3 }), undefined)
+  assert.equal(stepContext({}), undefined)
+  assert.ok(describeSteps(plan).includes('→ 2. Fix'))
+  assert.ok(describeSteps({ steps: ['', ''], currentStep: 0 }).includes('1. Step 1'))
 })
 
 test('MCP messages: initialize, list, call, notifications, unknown methods', () => {
@@ -66,19 +55,13 @@ test('MCP messages: initialize, list, call, notifications, unknown methods', () 
   assert.equal(init.result.protocolVersion, '2025-03-26')
   assert.equal(handleRpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, call), undefined)
   const list = handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, call) as { result: { tools: { name: string }[] } }
-  assert.deepEqual(list.result.tools.map((t) => t.name), ['job_status', 'complete_step'])
-  const result = handleRpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'job_status' } }, call) as {
+  assert.deepEqual(list.result.tools.map((t) => t.name), ['get_steps', 'set_steps', 'complete_step', 'set_step'])
+  const result = handleRpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_steps' } }, call) as {
     result: { content: { text: string }[] }
   }
   assert.equal(result.result.content[0].text, 'hi')
   assert.ok('error' in (handleRpc({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'rm' } }, call) as object))
   assert.ok('error' in (handleRpc({ jsonrpc: '2.0', id: 5, method: 'resources/list' }, call) as object))
-})
-
-test('job types accept advanceOn "claude" and a boolean confirm', () => {
-  assert.deepEqual(validateJobTypes([{ id: 'j', name: 'J', steps }]), [])
-  const bad = validateJobTypes([{ id: 'j', name: 'J', steps: [{ id: 'a', name: 'A', advanceOn: 'claude', confirm: 'yes' }] }])
-  assert.equal(bad.length, 1)
 })
 
 function send(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
@@ -124,19 +107,3 @@ test('the MCP endpoint and hook replies use the per-process token', async () => 
   }
 })
 
-test('a step with a skill starts as its slash command, sent unless autoSend is false', async () => {
-  const { stepInput } = await import('../src/shared/tags.ts')
-  assert.deepEqual(stepInput({ id: 'a', name: 'A', skill: 'build-apk', prompt: 'recipe-app debug' }), {
-    text: '/build-apk recipe-app debug',
-    send: true
-  })
-  assert.deepEqual(stepInput({ id: 'a', name: 'A', skill: 'caveman:caveman-review', autoSend: false }), {
-    text: '/caveman:caveman-review',
-    send: false
-  })
-  assert.deepEqual(stepInput({ id: 'a', name: 'A', prompt: 'Plan it.' }), { text: 'Plan it.', send: false })
-  assert.equal(stepInput({ id: 'a', name: 'A' }), undefined)
-  assert.ok(completedText(steps[1], { id: 'b', name: 'Build', skill: 'build-apk' }, 'skill').includes('/build-apk'))
-  assert.deepEqual(validateJobTypes([{ id: 'j', name: 'J', steps: [{ id: 'a', name: 'A', skill: 'plugin:x-y' }] }]), [])
-  assert.equal(validateJobTypes([{ id: 'j', name: 'J', steps: [{ id: 'a', name: 'A', skill: '/build-apk; rm' }] }]).length, 1)
-})

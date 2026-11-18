@@ -1,113 +1,119 @@
-import { currentStep } from '../shared/tags.ts'
-import type { JobStep, Session } from '../shared/types'
+import { cleanSteps, clampStep, MAX_STEPS, stepName } from '../shared/steps.ts'
+import type { Session } from '../shared/types'
 
 /**
- * The tools that let Claude see its job's steps and close the current one, served to each
- * session the app started as a small MCP server (see HookServer). Kept free of Electron so
- * it can be tested on its own.
+ * The tools that let Claude read and update its session's steps, served to each session the
+ * app started as a small MCP server (see HookServer). Kept free of Electron so it can be
+ * tested on its own.
  */
 
 export const MCP_SERVER_NAME = 'claude-hub'
 const PROTOCOL_VERSION = '2025-06-18'
 const MAX_NOTE = 500
 
+const noteSchema = { type: 'string', description: 'One short sentence on what was done, shown to the user' }
+
 export const TOOLS = [
   {
-    name: 'job_status',
-    description:
-      "Shows the job this Claude Hub session is working through: its steps, the current step and that step's goal. " +
-      'Use it when you are unsure what step you are on.',
+    name: 'get_steps',
+    description: "Shows this Claude Hub session's steps and which one is current.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  },
+  {
+    name: 'set_steps',
+    description:
+      "Sets this session's step list, shown to the user as progress (for example: Plan, Implement, Test, Open PR). " +
+      'Use it once the task is understood, and again if the plan changes. Keeps the current step unless you pass one.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        steps: { type: 'array', items: { type: 'string' }, maxItems: MAX_STEPS, description: 'Short step names, in order' },
+        current: { type: 'integer', minimum: 1, description: 'The step being worked on now, counting from 1' }
+      },
+      required: ['steps'],
+      additionalProperties: false
+    }
   },
   {
     name: 'complete_step',
     description:
-      "Marks the session's current job step as done once its goal is actually met (for example, the failing test exists, " +
-      "or the tests pass). Pass the current step's id. Only works on steps the user lets you close; if a step needs the " +
-      "user's approval, this asks them and you should wait.",
+      'Marks the current step done and moves to the next one. Call it when the step is actually finished and verified, ' +
+      'not before. Completing the last step marks the whole list done.',
+    inputSchema: { type: 'object', properties: { note: noteSchema }, additionalProperties: false }
+  },
+  {
+    name: 'set_step',
+    description: 'Moves to a given step (counting from 1), for example to go back to an earlier step. Prefer complete_step to move forward.',
     inputSchema: {
       type: 'object',
-      properties: {
-        step_id: { type: 'string', description: 'The id of the current step' },
-        note: { type: 'string', description: 'One sentence on what was done, shown to the user' }
-      },
-      required: ['step_id'],
+      properties: { step: { type: 'integer', minimum: 1 }, note: noteSchema },
+      required: ['step'],
       additionalProperties: false
     }
   }
 ]
 
-function describeCloser(step: JobStep): string {
-  const a = step.advanceOn
-  if (a === 'claude') return step.confirm ? 'you, with the user accepting it' : 'you, with complete_step'
-  if (a === 'stop') return 'the app, when your turn ends'
-  if (typeof a === 'object') return `GitHub, when the PR condition "${a.github}" is met`
-  return 'the user'
-}
-
-/** The text job_status returns. */
-export function jobStatus(s: Session): string {
-  const step = currentStep(s)
-  if (!s.steps?.length || !step) return 'This session has no job assigned.'
-  const lines = [`Job: ${s.jobTypeName ?? s.jobTypeId}`, 'Steps:']
-  for (const st of s.steps) lines.push(`${st.id === step.id ? '→' : ' '} ${st.id}: ${st.name} (closed by ${describeCloser(st)})`)
-  lines.push('', `Current step: ${step.name} (id "${step.id}")`)
-  if (step.prompt) lines.push(`Goal: ${step.prompt}`)
-  if (step.skill) lines.push(`Skill for this step: ${step.skill}`)
-  if (s.pendingStep?.stepId === step.id) lines.push('You already reported it done; the user has not accepted it yet.')
+/** The steps as a numbered list with the current one marked. */
+export function describeSteps(s: Pick<Session, 'steps' | 'currentStep'>): string {
+  const steps = s.steps ?? []
+  if (!steps.length) return 'This session has no steps yet. Call set_steps once the task is clear.'
+  const cur = clampStep(steps, s.currentStep)
+  const lines = steps.map((_, i) => `${i < cur ? '✓' : i === cur ? '→' : ' '} ${i + 1}. ${stepName(steps, i)}`)
+  if (cur >= steps.length) lines.push('All steps are done.')
   return lines.join('\n')
 }
 
-/**
- * Added to each prompt (UserPromptSubmit hook) while the current step is one Claude closes,
- * so it knows to call complete_step without being told every time.
- */
-export function stepContext(s: Session): string | undefined {
-  const step = currentStep(s)
-  if (!step || step.advanceOn !== 'claude' || s.pendingStep) return undefined
+/** Added to each prompt (UserPromptSubmit hook) while the session has unfinished steps. */
+export function stepContext(s: Pick<Session, 'steps' | 'currentStep'>): string | undefined {
+  const steps = s.steps ?? []
+  const cur = clampStep(steps, s.currentStep)
+  if (!steps.length || cur >= steps.length) return undefined
   return (
-    `[Claude Hub] This session is on step "${step.name}" (id "${step.id}") of the "${s.jobTypeName ?? s.jobTypeId}" job.` +
-    (step.prompt ? ` Step goal: ${step.prompt}` : '') +
-    (step.skill ? ` This step uses the ${step.skill} skill.` : '') +
-    ` When the goal is met and verified, call the ${MCP_SERVER_NAME} complete_step tool with step_id "${step.id}". Don't call it before then.`
+    `[Claude Hub] This session is on step ${cur + 1} of ${steps.length}: ${stepName(steps, cur)}. ` +
+    `When that step is finished and verified, call the ${MCP_SERVER_NAME} complete_step tool; if the plan changes, call set_steps.`
   )
 }
 
-export type Completion =
-  | { ok: false; message: string }
-  | { ok: true; step: JobStep; next?: JobStep; confirm: boolean; note?: string }
-
-/** Whether Claude may close the step it named, and what follows. */
-export function decideCompletion(s: Session, args: Record<string, unknown>): Completion {
-  const step = currentStep(s)
-  if (!s.steps?.length || !step) return { ok: false, message: 'This session has no job assigned, so there is no step to complete.' }
-  const stepId = typeof args.step_id === 'string' ? args.step_id : ''
-  if (stepId !== step.id)
-    return { ok: false, message: `The current step is "${step.name}" (id "${step.id}"), not "${stepId}". Steps can't be skipped.` }
-  if (step.advanceOn !== 'claude')
-    return {
-      ok: false,
-      message: `Step "${step.name}" is closed by ${describeCloser(step)}, not by you. Tell the user it is ready instead.`
-    }
-  if (s.pendingStep?.stepId === step.id)
-    return { ok: false, message: 'You already reported this step done; wait for the user to accept it.' }
-  const i = s.steps.indexOf(step)
-  const note = typeof args.note === 'string' && args.note.trim() ? args.note.trim().slice(0, MAX_NOTE) : undefined
-  return { ok: true, step, next: s.steps[i + 1], confirm: !!step.confirm, note }
+export interface StepChange {
+  steps: string[]
+  currentStep: number
+  note?: string
+  /** What the tool tells Claude. */
+  text: string
 }
 
-/** What complete_step tells Claude after the step moved on. */
-/**
- * What complete_step tells Claude after the step moved on: carry on with the next goal now,
- * stop because the app starts the next step's skill after this turn, or stop for the user.
- */
-export function completedText(step: JobStep, next: JobStep | undefined, then: 'continue' | 'skill' | 'wait'): string {
-  if (!next) return `Step "${step.name}" is done. That was the last step of the job.`
-  let text = `Step "${step.name}" is done. Now on step "${next.name}" (id "${next.id}").`
-  if (then === 'continue' && next.prompt) text += `\nIts goal: ${next.prompt}\nContinue with it now.`
-  else if (then === 'skill') text += ` End your turn now; the app then starts it with /${next.skill}.`
-  else text += ' Stop here; the user will start it.'
-  return text
+const noteOf = (args: Record<string, unknown>) =>
+  typeof args.note === 'string' && args.note.trim() ? args.note.trim().slice(0, MAX_NOTE) : undefined
+
+/** Works out what a tool call changes; a string is an error to return to Claude. */
+export function applyStepTool(s: Pick<Session, 'steps' | 'currentStep'>, name: string, args: Record<string, unknown>): StepChange | string {
+  const steps = s.steps ?? []
+  const cur = clampStep(steps, s.currentStep)
+  if (name === 'set_steps') {
+    if (!Array.isArray(args.steps) || !args.steps.every((x) => typeof x === 'string')) return '"steps" must be a list of step names.'
+    const next = cleanSteps(args.steps as string[])
+    if (!next.length) return 'Give at least one step name.'
+    const wanted = args.current === undefined ? cur : Number(args.current) - 1
+    if (!Number.isInteger(wanted) || wanted < 0) return '"current" must be a step number from 1.'
+    const change = { steps: next, currentStep: Math.min(wanted, next.length - 1) }
+    return { ...change, text: `Steps set.\n${describeSteps(change)}` }
+  }
+  if (!steps.length) return 'This session has no steps yet. Call set_steps first.'
+  if (name === 'complete_step') {
+    if (cur >= steps.length) return 'All steps are already done.'
+    const currentStep = cur + 1
+    const text =
+      currentStep >= steps.length
+        ? `Step ${cur + 1} done. That was the last step; all steps are done.`
+        : `Step ${cur + 1} done. Now on step ${currentStep + 1} of ${steps.length}: ${stepName(steps, currentStep)}.`
+    return { steps, currentStep, note: noteOf(args), text }
+  }
+  if (name === 'set_step') {
+    const n = Number(args.step)
+    if (!Number.isInteger(n) || n < 1 || n > steps.length) return `"step" must be between 1 and ${steps.length}.`
+    return { steps, currentStep: n - 1, note: noteOf(args), text: `Now on step ${n} of ${steps.length}: ${stepName(steps, n - 1)}.` }
+  }
+  return `Unknown tool: ${name}`
 }
 
 export interface ToolResult {

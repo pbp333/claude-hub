@@ -2,11 +2,11 @@ import { app } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, resolve } from 'node:path'
-import { currentStep, needsAttention, stepInput } from '../shared/tags'
+import { cleanSteps, clampStep, progressLabel } from '../shared/steps'
+import { needsAttention } from '../shared/tags'
 import type {
   AttentionState,
   HubState,
-  JobType,
   NewSessionOptions,
   PrInfo,
   Project,
@@ -19,8 +19,9 @@ import { isInside } from './files'
 import { claudeProjectsDir, closestConversation, listHistory } from './history'
 import { currentBranch, fetchPr, findRepos, repoFor, toPosix } from './git'
 import { HookServer, isClaudeSessionId, shouldNotify, showsDialog, stateForEvent, type HookEvent } from './hooks'
+import { writePlugin } from './plugin'
 import { PtyManager } from './pty'
-import { completedText, decideCompletion, jobStatus, stepContext, type ToolResult } from './stepTools'
+import { applyStepTool, describeSteps, stepContext, type ToolResult } from './stepTools'
 import type { JsonStore } from './store'
 
 /** What the session manager needs from the Electron side. */
@@ -51,9 +52,7 @@ interface Runtime {
   quietTimer?: NodeJS.Timeout
   readyTimer?: NodeJS.Timeout
   readyDeadline?: NodeJS.Timeout
-  /** Prompt waiting for the CLI to finish starting. */
-  pendingPrompt?: { text: string; send: boolean }
-  /** The CLI is showing a dialog (folder trust, login); the prompt waits until the user answers it. */
+  /** The CLI is showing a dialog (folder trust, login) that the user has to answer. */
   awaitingUser?: boolean
   nextPrCheck: number
   prTimer?: NodeJS.Timeout
@@ -98,6 +97,11 @@ export class SessionManager {
     await this.hooks.start()
     this.store.write('hub-hooks.json', JSON.parse(this.hooks.settingsJson()))
     this.store.write('hub-mcp.json', JSON.parse(this.hooks.mcpConfigJson()))
+    try {
+      writePlugin(this.store.path('claude-plugin'))
+    } catch (err) {
+      console.error('Could not write the Claude plugin:', err)
+    }
     const wasRunning = new Set(this.sessions.filter((s) => s.running && !s.archived).map((s) => s.id))
     for (const s of this.sessions) {
       s.running = false
@@ -118,7 +122,6 @@ export class SessionManager {
       sessions: this.sessions,
       tags: this.config.tags,
       rules: this.config.rules,
-      jobTypes: this.config.jobTypes,
       settings: this.config.settings,
       configErrors: this.config.errors,
       recentFolders: this.recentFolders,
@@ -163,7 +166,6 @@ export class SessionManager {
     if (!existsSync(project.path)) throw new Error(`Folder not found: ${project.path}`)
     const cwd = opts.cwd && isInside(project.path, opts.cwd) && existsSync(opts.cwd) ? opts.cwd : project.path
     const now = new Date().toISOString()
-    const job = opts.jobTypeId ? this.config.jobTypes.find((j) => j.id === opts.jobTypeId) : undefined
     const count = this.sessions.filter((s) => s.projectId === project.id && !s.archived).length
     const session: Session = {
       id: randomUUID(),
@@ -184,7 +186,13 @@ export class SessionManager {
       updatedAt: now,
       lastActivityAt: now
     }
-    if (job && opts.kind === 'claude') this.applyJob(session, job)
+    const steps = Array.isArray(opts.steps) ? cleanSteps(opts.steps.filter((x) => typeof x === 'string')) : []
+    // A plain count arrives as empty names; cleanSteps would drop those.
+    const stepCount = Array.isArray(opts.steps) && opts.steps.every((x) => x === '') ? Math.min(opts.steps.length, 30) : 0
+    if (steps.length || stepCount) {
+      session.steps = steps.length ? steps : Array(stepCount).fill('')
+      session.currentStep = 0
+    }
     // A workspace that is itself a repo is always the session's repo.
     const repos = await findRepos(project.path)
     if (repos.length === 1 && repos[0] === toPosix(project.path).replace(/\/$/, '')) await this.addRepo(session, repos[0])
@@ -367,7 +375,14 @@ export class SessionManager {
       }
       const claudeArgs = [...settings.claudeArgs]
       if (settings.hooksEnabled)
-        claudeArgs.push('--settings', this.store.path('hub-hooks.json'), '--mcp-config', this.store.path('hub-mcp.json'))
+        claudeArgs.push(
+          '--settings',
+          this.store.path('hub-hooks.json'),
+          '--mcp-config',
+          this.store.path('hub-mcp.json'),
+          '--plugin-dir',
+          this.store.path('claude-plugin')
+        )
       if (resume && session.claudeSessionId && isClaudeSessionId(session.claudeSessionId))
         claudeArgs.push('--resume', session.claudeSessionId)
       else if (resume && searchName) {
@@ -396,12 +411,6 @@ export class SessionManager {
       })
       return
     }
-    // A new session starts on the job's first step: paste its prompt once the CLI is ready.
-    if (!resume && session.kind === 'claude') {
-      const step = currentStep(session)
-      const input = step && stepInput(step)
-      if (input) rt.pendingPrompt = input
-    }
     rt.readyDeadline = setTimeout(() => this.onReady(session.id), READY_MAX_MS)
     this.update(session.id, (s) => {
       s.running = true
@@ -418,31 +427,12 @@ export class SessionManager {
     const s = this.get(id)
     if (!s) return
     if (s.kind === 'claude' && showsDialog(this.ptys.screenText(id))) {
-      // Never type into a dialog: a pasted prompt plus Enter could pick an option.
+      // The session needs the user until they answer it.
       rt.awaitingUser = true
       this.setState(s, 'needs-you', 'Waiting for you to answer a prompt')
       return
     }
     if (s.attentionState === 'starting') this.setState(s, this.usesFallback(s) ? 'quiet' : 'idle')
-    if (rt.pendingPrompt) {
-      const { text, send } = rt.pendingPrompt
-      rt.pendingPrompt = undefined
-      this.pastePrompt(id, text, send)
-    }
-  }
-
-  /** Pastes now, or holds the prompt while the CLI is starting or waiting on a permission prompt or dialog. */
-  private deliverPrompt(s: Session, text: string, send: boolean): void {
-    const rt = this.rt(s.id)
-    if (s.attentionState === 'starting' || s.attentionState === 'needs-you' || rt.awaitingUser)
-      rt.pendingPrompt = { text, send }
-    else this.pastePrompt(s.id, text, send)
-  }
-
-  private pastePrompt(id: string, text: string, send: boolean): void {
-    // Bracketed paste keeps multi-line prompts as one input instead of submitting at each newline.
-    this.ptys.write(id, `\x1b[200~${text}\x1b[201~`)
-    if (send) setTimeout(() => this.ptys.write(id, '\r'), 150)
   }
 
   private onPtyData(id: string, data: string): void {
@@ -515,15 +505,6 @@ export class SessionManager {
     }
     void this.trackRepos(s, event)
     if (event.name === 'Stop') {
-      // A prompt held back while Claude was asking for permission goes in now.
-      const rt = this.rt(s.id)
-      if (rt.pendingPrompt && !rt.awaitingUser) {
-        const { text, send } = rt.pendingPrompt
-        rt.pendingPrompt = undefined
-        this.pastePrompt(s.id, text, send)
-      }
-      const step = currentStep(s)
-      if (step?.advanceOn === 'stop') this.nextStep(s.id, 'Claude finished')
       void this.refreshBranches(s.id)
       this.schedulePrCheck(s.id, 3000)
     }
@@ -534,41 +515,15 @@ export class SessionManager {
     return undefined
   }
 
-  /** The job_status and complete_step tools, called by Claude through the hub's MCP server. */
+  /** The step tools (get_steps, set_steps, complete_step, set_step), called by Claude through the hub's MCP server. */
   private onStepTool(key: string, name: string, args: Record<string, unknown>): ToolResult {
     const s = this.sessionForKey(key)
     if (!s) return { text: 'This Claude process is no longer managed by Claude Hub.', isError: true }
-    if (name === 'job_status') return { text: jobStatus(s) }
-    const decision = decideCompletion(s, args)
-    if (!decision.ok) return { text: decision.message, isError: true }
-    const { step, next, note } = decision
-    if (decision.confirm) {
-      this.update(s.id, (x) => (x.pendingStep = { stepId: step.id, note, at: new Date().toISOString() }))
-      this.host.notify(s, `Claude says "${step.name}" is done${note ? `: ${note}` : ''}. Accept it to move on.`)
-      return {
-        text: `Asked the user to accept step "${step.name}" as done. Stop here and wait; you'll get the next step's instructions once they accept.`
-      }
-    }
-    if (!next) return { text: completedText(step, undefined, 'wait') }
-    // A plain next prompt goes back in the tool result, so Claude carries on in the same turn
-    // instead of it being typed in while Claude is still working. A skill is typed in as its
-    // slash command once this turn ends.
-    const input = stepInput(next)
-    const then = input?.send ? (next.skill ? 'skill' : 'continue') : 'wait'
-    this.setStep(s.id, next.id, `Claude finished "${step.name}"${note ? ` (${note})` : ''}`, {
-      promptInResult: then === 'continue',
-      afterTurn: true
-    })
-    return { text: completedText(step, next, then) }
-  }
-
-  /** The user didn't accept Claude's "step done": stay on the step and let them say why. */
-  rejectPendingStep(id: string): void {
-    const s = this.get(id)
-    const step = s && currentStep(s)
-    if (!s?.pendingStep || !step) return
-    this.update(id, (x) => (x.pendingStep = undefined))
-    if (s.running) this.deliverPrompt(s, `Step "${step.name}" isn't done yet: `, false)
+    if (name === 'get_steps') return { text: describeSteps(s) }
+    const change = applyStepTool(s, name, args)
+    if (typeof change === 'string') return { text: change, isError: true }
+    this.changeSteps(s.id, change.steps, change.currentStep, 'claude', change.note)
+    return { text: change.text }
   }
 
   /**
@@ -651,63 +606,54 @@ export class SessionManager {
     })
   }
 
-  // ---- job types -------------------------------------------------------
+  // ---- steps -----------------------------------------------------------
 
-  private applyJob(s: Session, job: JobType): void {
-    s.jobTypeId = job.id
-    s.jobTypeName = job.name
-    s.steps = structuredClone(job.steps)
-    s.currentStepId = job.steps[0].id
-    s.pendingStep = undefined
-    s.stepHistory = [{ stepId: job.steps[0].id, enteredAt: new Date().toISOString() }]
+  /** Replaces a session's steps (from the user); empty clears them. */
+  setSteps(id: string, steps: string[]): void {
+    const s = this.get(id)
+    if (!s) return
+    const names = steps.every((x) => x === '') ? steps.slice(0, 30) : cleanSteps(steps)
+    if (!names.length) {
+      this.update(id, (x) => {
+        x.steps = x.currentStep = undefined
+        x.stepHistory = []
+      })
+      return
+    }
+    this.changeSteps(id, names, clampStep(names, Math.min(s.currentStep ?? 0, names.length - 1)), 'user')
   }
 
-  setJobType(id: string, jobTypeId: string | undefined): void {
-    const job = jobTypeId ? this.config.jobTypes.find((j) => j.id === jobTypeId) : undefined
-    this.update(id, (s) => {
-      if (job) this.applyJob(s, job)
-      else {
-        s.jobTypeId = s.jobTypeName = s.steps = s.currentStepId = s.pendingStep = undefined
-        s.stepHistory = []
+  /** Moves the current step by `delta` (the Next/Back buttons and Cmd+Alt+N). */
+  moveStep(id: string, delta: number): void {
+    const s = this.get(id)
+    if (!s?.steps?.length) return
+    this.changeSteps(id, s.steps, clampStep(s.steps, (s.currentStep ?? 0) + delta), 'user')
+  }
+
+  /** Sets the current step (0-based; steps.length = all done). */
+  goToStep(id: string, index: number): void {
+    const s = this.get(id)
+    if (!s?.steps?.length || !Number.isInteger(index)) return
+    this.changeSteps(id, s.steps, clampStep(s.steps, index), 'user')
+  }
+
+  private changeSteps(id: string, steps: string[], currentStep: number, by: 'user' | 'claude', note?: string): void {
+    const s = this.get(id)
+    if (!s) return
+    const moved = s.currentStep !== currentStep || !s.steps
+    this.update(id, (x) => {
+      x.steps = steps
+      x.currentStep = currentStep
+      if (moved) {
+        x.stepHistory.push({ step: currentStep, at: new Date().toISOString(), by, ...(note ? { note } : {}) })
+        if (x.stepHistory.length > 200) x.stepHistory.splice(0, x.stepHistory.length - 200)
       }
     })
-    const s = this.get(id)
-    const step = s && currentStep(s)
-    const input = step && stepInput(step)
-    if (s?.running && input) this.deliverPrompt(s, input.text, input.send)
-  }
-
-  nextStep(id: string, reason?: string): void {
-    const s = this.get(id)
-    if (!s?.steps) return
-    const i = s.steps.findIndex((st) => st.id === s.currentStepId)
-    // Accepting Claude's "done" on the last step just clears it.
-    if (i === s.steps.length - 1 && s.pendingStep) this.update(id, (x) => (x.pendingStep = undefined))
-    if (i < 0 || i >= s.steps.length - 1) return
-    this.setStep(id, s.steps[i + 1].id, reason)
-  }
-
-  setStep(id: string, stepId: string, reason?: string, opts: { promptInResult?: boolean; afterTurn?: boolean } = {}): void {
-    const s = this.get(id)
-    const step = s?.steps?.find((st) => st.id === stepId)
-    if (!s || !step || s.currentStepId === stepId) return
-    // Moving on from a step Claude reported done is the user accepting it.
-    const pending = s.pendingStep?.stepId === s.currentStepId ? s.pendingStep : undefined
-    const why = reason ?? (pending ? `Accepted: Claude finished it${pending.note ? ` (${pending.note})` : ''}` : undefined)
-    this.update(id, (x) => {
-      x.currentStepId = stepId
-      x.pendingStep = undefined
-      x.stepHistory.push({ stepId, enteredAt: new Date().toISOString(), ...(why ? { reason: why } : {}) })
-    })
-    if (reason) this.host.notify(s, `${reason}: moved to "${step.name}"`)
-    const input = stepInput(step)
-    if (s.running && input && !opts.promptInResult) {
-      // Typed in when Claude's current turn ends (see the Stop hook).
-      if (opts.afterTurn) this.rt(id).pendingPrompt = input
-      else this.deliverPrompt(s, input.text, input.send)
+    // Claude moving on is worth a heads-up when you're not looking at the session.
+    if (by === 'claude' && moved && !this.host.isViewing(id)) {
+      const label = currentStep >= steps.length ? 'All steps done' : `Now on ${progressLabel({ steps, currentStep })}`
+      this.host.notify(s, `${label}${note ? ` (${note})` : ''}`)
     }
-    // A step waiting on GitHub may already be satisfied.
-    if (typeof step.advanceOn === 'object') this.schedulePrCheck(id, 1000)
   }
 
   // ---- GitHub ----------------------------------------------------------
@@ -785,10 +731,6 @@ export class SessionManager {
     }
     const autoTags = this.config.rules.filter((r) => r.enabled && conditions.has(r.when)).map((r) => r.setTag)
     this.update(id, (x) => (x.autoTags = autoTags))
-    const step = currentStep(s)
-    if (step && typeof step.advanceOn === 'object' && conditions.has(step.advanceOn.github)) {
-      this.nextStep(id, `GitHub: ${step.advanceOn.github}`)
-    }
   }
 
   // ---- helpers ---------------------------------------------------------
@@ -863,6 +805,22 @@ function migrateSession(raw: Session): Session {
   old.claudeSessionIds = old.claudeSessionIds.filter((id) => typeof id === 'string' && isClaudeSessionId(id))
   if (!Array.isArray(old.tagIds)) old.tagIds = []
   if (!Array.isArray(old.autoTags)) old.autoTags = []
-  if (!Array.isArray(old.stepHistory)) old.stepHistory = []
+  // Steps used to come from job types ({ id, name, ... } objects with a current step id).
+  const legacy = old as Session & { currentStepId?: string; jobTypeId?: string; jobTypeName?: string; pendingStep?: unknown }
+  if (Array.isArray(legacy.steps) && legacy.steps.some((x) => typeof x !== 'string')) {
+    const objs = legacy.steps as unknown as { id?: string; name?: string }[]
+    legacy.currentStep = Math.max(0, objs.findIndex((x) => x?.id === legacy.currentStepId))
+    legacy.steps = cleanSteps(objs.map((x) => (typeof x?.name === 'string' ? x.name : '')))
+    legacy.stepHistory = []
+  }
+  delete legacy.currentStepId
+  delete legacy.jobTypeId
+  delete legacy.jobTypeName
+  delete legacy.pendingStep
+  if (!Array.isArray(old.steps) || !old.steps.length) {
+    delete old.steps
+    delete old.currentStep
+  } else old.currentStep = clampStep(old.steps, old.currentStep)
+  if (!Array.isArray(old.stepHistory) || old.stepHistory.some((h) => typeof h?.step !== 'number')) old.stepHistory = []
   return old
 }

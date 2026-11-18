@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { parseStepsInput, stepName, stepsInputText } from '../../../shared/steps'
 import type { SessionKind } from '../../../shared/types'
 import { errorMessage } from '../errors'
 import { getSession, useProject, useSession, useUi } from '../store'
@@ -26,15 +27,15 @@ export function Dialogs() {
   if (!dialog) return null
   if (dialog.type === 'newSession') return <NewSessionDialog onClose={close} />
   if (dialog.type === 'rename') return <RenameDialog sessionId={dialog.sessionId} onClose={close} />
+  if (dialog.type === 'steps') return <StepsDialog sessionId={dialog.sessionId} onClose={close} />
   return <Palette mode={dialog.mode} onClose={close} />
 }
 
 function NewSessionDialog({ onClose }: { onClose: () => void }) {
-  const hub = useUi((s) => s.hub)
   const project = useProject()
   const [name, setName] = useState('')
   const [kind, setKind] = useState<SessionKind>('claude')
-  const [jobTypeId, setJobTypeId] = useState(() => localStorage.getItem('lastJobType') ?? '')
+  const [steps, setSteps] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
@@ -42,14 +43,10 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
     e.preventDefault()
     if (!project || busy) return
     setBusy(true)
-    try {
-      localStorage.setItem('lastJobType', jobTypeId)
-    } catch {
-      // storage unavailable
-    }
     let id: string
     try {
-      id = await window.hub.createSession({ projectId: project.id, name, kind, jobTypeId: jobTypeId || undefined })
+      const list = parseStepsInput(steps)
+      id = await window.hub.createSession({ projectId: project.id, name, kind, steps: list.length ? list : undefined })
     } catch (err) {
       setError(errorMessage(err))
       setBusy(false)
@@ -61,7 +58,6 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
     open()
   }
 
-  const job = hub?.jobTypes.find((j) => j.id === jobTypeId)
   return (
     <Modal onClose={onClose}>
       <form onSubmit={submit} className="form">
@@ -80,42 +76,10 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
             <option value="shell">Plain shell</option>
           </select>
         </label>
-        {kind === 'claude' && (
-          <label>
-            Job type
-            <select value={jobTypeId} onChange={(e) => setJobTypeId(e.target.value)}>
-              <option value="">None</option>
-              {hub?.jobTypes.map((j) => (
-                <option key={j.id} value={j.id}>
-                  {j.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        {kind === 'claude' && job && (
-          <ol className="steps-preview">
-            {job.steps.map((s) => (
-              <li key={s.id}>
-                {s.name}
-                {s.skill && <code className="step-skill"> /{s.skill}</code>}
-                {s.advanceOn && s.advanceOn !== 'manual' && (
-                  <span className="muted">
-                    {' '}
-                    ·{' '}
-                    {s.advanceOn === 'stop'
-                      ? 'moves on when Claude finishes'
-                      : s.advanceOn === 'claude'
-                        ? s.confirm
-                          ? 'Claude marks it done, you accept'
-                          : 'Claude marks it done'
-                        : `moves on on GitHub: ${s.advanceOn.github}`}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ol>
-        )}
+        <label>
+          Steps (optional)
+          <StepsInput value={steps} onChange={setSteps} />
+        </label>
         {error && <div className="form-error">{error}</div>}
         <div className="actions">
           <button type="button" onClick={onClose}>
@@ -123,6 +87,59 @@ function NewSessionDialog({ onClose }: { onClose: () => void }) {
           </button>
           <button type="submit" className="primary" disabled={!project || busy}>
             Start
+          </button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function StepsInput({ value, onChange, autoFocus }: { value: string; onChange: (v: string) => void; autoFocus?: boolean }) {
+  return (
+    <>
+      <textarea
+        className="steps-input"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={4}
+        autoFocus={autoFocus}
+        placeholder={'One step per line, or just a number (e.g. 4).\nClaude can also set them: /hub:steps'}
+      />
+    </>
+  )
+}
+
+/** Edit a session's steps: names one per line, or a count. */
+function StepsDialog({ sessionId, onClose }: { sessionId?: string; onClose: () => void }) {
+  const activeId = useUi((s) => s.activeSessionId)
+  const id = sessionId ?? activeId
+  const session = useSession(id)
+  const [text, setText] = useState(() => stepsInputText(session?.steps))
+  if (!session) return null
+  const parsed = parseStepsInput(text)
+  return (
+    <Modal onClose={onClose}>
+      <form
+        className="form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          window.hub.setSteps(session.id, parsed)
+          onClose()
+        }}
+      >
+        <h2>Steps for {session.name}</h2>
+        <StepsInput value={text} onChange={setText} autoFocus />
+        <p className="muted form-note">
+          {parsed.length
+            ? `${parsed.length} step${parsed.length === 1 ? '' : 's'}: ${parsed.map((_, i) => stepName(parsed, i)).join(' → ')}`
+            : 'No steps. Saving clears them.'}
+        </p>
+        <div className="actions">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary">
+            Save
           </button>
         </div>
       </form>
@@ -197,7 +214,6 @@ export function commandItems(): PaletteItem[] {
     { label: 'Go to next session that needs me', run: () => goToNextNeedsYou() },
     { label: 'Toggle file tree', run: () => ui.toggleFileTree() },
     { label: 'Close tab', run: () => closeActivePanel() },
-    { label: 'Edit job types', detail: 'jobTypes.json', run: editConfig('jobTypes.json') },
     { label: 'Edit tags', detail: 'tags.json', run: editConfig('tags.json') },
     { label: 'Edit GitHub rules', detail: 'rules.json', run: editConfig('rules.json') },
     { label: 'Edit settings', detail: 'settings.json', run: editConfig('settings.json') }
@@ -206,12 +222,18 @@ export function commandItems(): PaletteItem[] {
     items.push(
       { label: 'Rename session', detail: session.name, run: () => ui.openDialog({ type: 'rename', sessionId: session.id }) },
       { label: session.running ? 'Restart session' : 'Resume session', detail: session.name, run: () => window.hub.restartSession(session.id) },
-      { label: 'Session menu (tags, job type, steps)', detail: session.name, run: () => window.hub.sessionMenu(session.id) }
+      { label: 'Session menu (tags, steps)', detail: session.name, run: () => window.hub.sessionMenu(session.id) },
+      { label: session.steps ? 'Edit steps' : 'Add steps', detail: session.name, run: () => ui.openDialog({ type: 'steps', sessionId: session.id }) }
     )
-    if (session.steps) {
-      items.push({ label: 'Next step', detail: session.name, run: () => window.hub.nextStep(session.id) })
-      for (const step of session.steps)
-        items.push({ label: `Go to step: ${step.name}`, detail: session.name, run: () => window.hub.setStep(session.id, step.id) })
+    const steps = session.steps ?? []
+    if (steps.length) {
+      items.push(
+        { label: 'Next step', detail: session.name, run: () => window.hub.moveStep(session.id, 'next') },
+        { label: 'Previous step', detail: session.name, run: () => window.hub.moveStep(session.id, 'back') }
+      )
+      steps.forEach((_, i) =>
+        items.push({ label: `Go to step ${i + 1}: ${stepName(steps, i)}`, detail: session.name, run: () => window.hub.goToStep(session.id, i) })
+      )
     }
     for (const repo of session.repos)
       if (repo.pr) items.push({ label: `Open PR #${repo.pr.number} (${repo.name})`, run: () => window.hub.openExternal(repo.pr!.url) })

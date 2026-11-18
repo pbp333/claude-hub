@@ -1,5 +1,6 @@
 import type { IDockviewPanelProps } from 'dockview-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { progressLabel, stepName } from '../../../shared/steps'
 import type { Session, Transcript, TranscriptEntry } from '../../../shared/types'
 import { errorMessage } from '../errors'
 import { useProject, useUi } from '../store'
@@ -116,17 +117,24 @@ function Entries({ entries, projectId, claudeSessionId }: { entries: TranscriptE
   )
 }
 
+/** How long each step took, from the session's step history. */
 function StepTimeline({ session }: { session: Session }) {
-  if (!session.steps?.length || !session.stepHistory.length) return null
-  const names = new Map(session.steps.map((s) => [s.id, s.name]))
+  const steps = session.steps ?? []
+  if (!steps.length || !session.stepHistory.length) return null
   return (
     <div className="step-timeline">
       {session.stepHistory.map((h, i) => {
-        const next = session.stepHistory[i + 1]?.enteredAt ?? session.closedAt ?? new Date().toISOString()
-        const minutes = Math.max(0, Math.round((new Date(next).getTime() - new Date(h.enteredAt).getTime()) / 60000))
+        const next = session.stepHistory[i + 1]
+        const until = next?.at ?? session.closedAt ?? new Date().toISOString()
+        const minutes = Math.max(0, Math.round((new Date(until).getTime() - new Date(h.at).getTime()) / 60000))
+        const label = h.step >= steps.length ? 'All done' : stepName(steps, h.step)
+        const ended = next ? `Left ${next.by === 'claude' ? 'by Claude' : 'by you'}${next.note ? `: ${next.note}` : ''}` : undefined
         return (
-          <span key={i} className="step-chip" title={session.stepHistory[i + 1]?.reason ? `Ended: ${session.stepHistory[i + 1].reason}` : undefined}>
-            {names.get(h.stepId) ?? h.stepId} <span className="muted">{minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`}</span>
+          <span key={i} className="step-chip" title={ended}>
+            {label}
+            {h.step < steps.length && (
+              <span className="muted"> {minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`}</span>
+            )}
           </span>
         )
       })}
@@ -189,7 +197,7 @@ export function TranscriptPanel({ params, api }: IDockviewPanelProps<Params>) {
           {transcript?.startedAt && `Started ${relativeTime(transcript.startedAt)}`}
           {transcript?.branch && ` · ${transcript.branch}`}
           {owner && ` · ${owner.archived ? 'closed session' : 'session'} "${owner.name}"`}
-          {owner?.jobTypeName && ` · ${owner.jobTypeName}`}
+          {owner && progressLabel(owner) && ` · ${progressLabel(owner)}`}
         </div>
         {owner && <StepTimeline session={owner} />}
         <div className="transcript-actions">

@@ -19,10 +19,11 @@ export interface HubApi {
   sessionMenu(id: string): void
   setActiveSession(id: string | undefined): void
   toggleTag(id: string, tagId: string): void
-  nextStep(id: string): void
-  setStep(id: string, stepId: string): void
-  /** Turns down Claude's report that the current step is done. */
-  rejectStep(id: string): void
+  /** Replaces the session's steps (names, or empty names for a plain count); [] clears them. */
+  setSteps(id: string, steps: string[]): void
+  moveStep(id: string, direction: 'next' | 'back'): void
+  /** 0-based; the step count means all done. */
+  goToStep(id: string, index: number): void
   ptyWrite(id: string, data: string): void
   ptyResize(id: string, cols: number, rows: number): void
   ptyBuffer(id: string): Promise<string>

@@ -258,23 +258,8 @@ kbd {
   margin-top: 3px;
 }
 
-.step-next {
-  font-size: 10px;
-  padding: 0 6px;
-}
 
-.progress {
-  flex-basis: 100%;
-  height: 3px;
-  background: var(--bg-raised);
-  border-radius: 2px;
-  overflow: hidden;
-}
 
-.progress > div {
-  height: 100%;
-  background: var(--accent);
-}
 
 .session-tags {
   display: flex;
@@ -580,11 +565,6 @@ kbd {
   font-size: 12px;
 }
 
-.steps-preview {
-  margin: 0;
-  padding-left: 20px;
-  font-size: 12px;
-}
 
 .actions {
   display: flex;
@@ -927,24 +907,6 @@ pre.code {
   padding: 0 4px;
 }
 
-.step-pending {
-  flex-basis: 100%;
-  margin-top: 6px;
-  padding: 6px 8px;
-  border: 1px solid #d7ba7d;
-  border-radius: 4px;
-  background: rgba(215, 186, 125, 0.08);
-  font-size: 12px;
-  white-space: normal;
-}
-.step-pending-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
-}
-.step-reason {
-  font-size: 11px;
-}
 
 .session-row {
   position: relative;
@@ -970,10 +932,6 @@ pre.code {
   background: rgba(255, 255, 255, 0.08);
 }
 
-.step-skill {
-  font-size: 11px;
-  opacity: 0.8;
-}
 
 .hub-tab {
   display: flex;
@@ -991,4 +949,68 @@ pre.code {
 .hub-tab.attention {
   box-shadow: inset 0 -2px 0 var(--needs-you);
   color: var(--needs-you);
+}
+
+.step-label {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.step-label:hover {
+  text-decoration: underline;
+}
+.step-buttons {
+  display: flex;
+  gap: 2px;
+}
+.step-buttons button {
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 16px;
+}
+.step-segments {
+  flex-basis: 100%;
+  display: flex;
+  gap: 2px;
+  margin-top: 3px;
+}
+.step-segments button {
+  flex: 1;
+  height: 5px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+.step-segments button.done {
+  background: var(--accent, #d97757);
+}
+.step-segments button.current {
+  background: var(--accent, #d97757);
+  opacity: 0.5;
+}
+.step-segments button:hover {
+  outline: 1px solid rgba(255, 255, 255, 0.4);
+}
+.add-steps {
+  margin-top: 3px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted, #888);
+  font-size: 11px;
+  opacity: 0;
+}
+.session-row:hover .add-steps,
+.add-steps:focus-visible {
+  opacity: 1;
+}
+.steps-input {
+  width: 100%;
+  font: inherit;
+  resize: vertical;
 }

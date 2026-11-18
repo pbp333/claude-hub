@@ -49,47 +49,14 @@ export interface Rule {
   enabled: boolean
 }
 
-/**
- * Who closes a step: the user (manual), the end of Claude's turn (stop), a PR condition
- * (github), or Claude itself through the hub's complete_step tool (claude).
- */
-export type AdvanceOn = 'manual' | 'stop' | 'claude' | { github: PrCondition }
 
-export interface JobStep {
-  id: string
-  name: string
-  prompt?: string
-  autoSend?: boolean
-  advanceOn?: AdvanceOn
-  /**
-   * A skill run when the step starts: "/<skill> <prompt>" is sent to Claude (the prompt
-   * becomes the skill's arguments). Sent right away unless autoSend is false.
-   */
-  skill?: string
-  /** With advanceOn "claude": Claude's completion waits for the user to accept it. */
-  confirm?: boolean
-  /** Tag id or name set while the session is on this step. */
-  tag?: string
-}
-
-export interface JobType {
-  id: string
-  name: string
-  steps: JobStep[]
-}
-
+/** One change of a session's current step. */
 export interface StepEntry {
-  stepId: string
-  enteredAt: string
-  /** Why the previous step ended, e.g. Claude's note when it completed it. */
-  reason?: string
-}
-
-/** Claude said a step is done; the step has confirm set, so it waits for the user. */
-export interface PendingStep {
-  stepId: string
-  note?: string
+  /** 0-based index of the step entered; equal to the step count when all are done. */
+  step: number
   at: string
+  by: 'user' | 'claude'
+  note?: string
 }
 
 export interface PrInfo {
@@ -123,7 +90,7 @@ export interface Session {
   claudeSessionId?: string
   /** Every Claude conversation this session has had, oldest first, for the History tab. */
   claudeSessionIds: string[]
-  /** Closed sessions are kept (archived) so History still shows their job, steps and tags. */
+  /** Closed sessions are kept (archived) so History still shows their steps and tags. */
   archived?: boolean
   closedAt?: string
   attentionState: AttentionState
@@ -135,13 +102,14 @@ export interface Session {
   tagIds: string[]
   /** Tag ids set by GitHub rules, across the session's repos. */
   autoTags: string[]
-  jobTypeId?: string
-  jobTypeName?: string
-  /** Copied from the job type at start, so editing jobTypes.json never breaks a running session. */
-  steps?: JobStep[]
-  currentStepId?: string
+  /**
+   * The session's own step list, set by the user or by Claude (hub tools). Names may be
+   * empty: a plain count ("step 2 of 5") is fine.
+   */
+  steps?: string[]
+  /** 0-based index of the step being worked on; equal to steps.length once all are done. */
+  currentStep?: number
   stepHistory: StepEntry[]
-  pendingStep?: PendingStep
   createdAt: string
   updatedAt: string
   lastActivityAt: string
@@ -192,7 +160,6 @@ export interface HubState {
   sessions: Session[]
   tags: Tag[]
   rules: Rule[]
-  jobTypes: JobType[]
   settings: Settings
   configErrors: ConfigError[]
   recentFolders: string[]
@@ -204,7 +171,8 @@ export interface NewSessionOptions {
   projectId: string
   name?: string
   kind: SessionKind
-  jobTypeId?: string
+  /** Optional steps to start with. */
+  steps?: string[]
   /** Continue this Claude conversation (from History) instead of starting a new one. */
   resumeClaudeSessionId?: string
   /**
@@ -279,6 +247,7 @@ export type UiCommand =
   | { type: 'showHistory' }
   | { type: 'openTranscript'; claudeSessionId: string; title: string }
   | { type: 'closeTab' }
+  | { type: 'editSteps'; sessionId?: string }
   | { type: 'focusSession'; sessionId: string }
   | { type: 'switchSession'; index: number }
   | { type: 'openFile'; path: string; line?: number; column?: number }
