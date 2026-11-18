@@ -387,9 +387,14 @@ export class SessionManager {
         claudeArgs.push('--resume', session.claudeSessionId)
       else if (resume && searchName) {
         // One "--resume=<name>" argument, so a name can't be read as another option.
-        const name = searchName.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 80)
+        const name = cleanArgName(searchName)
         if (name) claudeArgs.push(`--resume=${name}`)
       }
+      // Name Claude's conversation after the hub session (shown in /resume and the terminal title),
+      // unless the user's own claudeArgs already set one.
+      const displayName = cleanArgName(session.name)
+      if (displayName && !claudeArgs.some((a) => /^(-n|--name)(=|$)/.test(a)))
+        claudeArgs.push(`--name=${displayName}`)
       // .cmd shims can't be spawned directly on Windows; cmd.exe gets one escaped command line.
       if (/\.(cmd|bat)$/i.test(exe)) {
         file = process.env.ComSpec || 'cmd.exe'
@@ -823,4 +828,9 @@ function migrateSession(raw: Session): Session {
   } else old.currentStep = clampStep(old.steps, old.currentStep)
   if (!Array.isArray(old.stepHistory) || old.stepHistory.some((h) => typeof h?.step !== 'number')) old.stepHistory = []
   return old
+}
+
+/** A session name made safe to pass as a single CLI argument value. */
+function cleanArgName(name: string): string {
+  return name.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 80)
 }
