@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { effectiveTags, needsAttention } from '../src/shared/tags.ts'
+import { attentionKind, attentionRank, effectiveTags, needsAttention } from '../src/shared/tags.ts'
 import type { Session, Tag } from '../src/shared/types.ts'
 
 const tags: Tag[] = [
@@ -31,4 +31,18 @@ test('needs attention when blocked, or done and unseen', () => {
   assert.equal(needsAttention(session({ attentionState: 'done', unread: true })), true)
   assert.equal(needsAttention(session({ attentionState: 'done', unread: false })), false)
   assert.equal(needsAttention(session({ attentionState: 'working' })), false)
+})
+
+test('tells waiting-for-input apart from unread output', () => {
+  assert.equal(attentionKind(session({ attentionState: 'needs-you' })), 'input')
+  assert.equal(attentionKind(session({ attentionState: 'needs-you', unread: true })), 'input')
+  assert.equal(attentionKind(session({ attentionState: 'done', unread: true })), 'unread')
+  assert.equal(attentionKind(session({ attentionState: 'done', unread: false })), undefined)
+  assert.equal(attentionKind(session({ attentionState: 'idle', unread: true })), undefined)
+  const ranks = [
+    session({ attentionState: 'working' }),
+    session({ attentionState: 'done', unread: true }),
+    session({ attentionState: 'needs-you' })
+  ].map(attentionRank)
+  assert.deepEqual(ranks, [2, 1, 0])
 })

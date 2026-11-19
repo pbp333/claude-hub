@@ -37,7 +37,10 @@ export function getTerminal(sessionId: string): Entry {
     cursorBlink: true,
     allowProposedApi: true,
     scrollback: 10000,
-    macOptionIsMeta: true,
+    // Option must stay a character modifier: on many layouts it types @ # [ ] { } | ~ (e.g.
+    // Option+2 = @ on Portuguese/Spanish Macs). xterm still sends Esc-prefixed Option+Enter,
+    // Option+Backspace and Option+arrows, so newline-in-Claude and word moves keep working.
+    macOptionIsMeta: false,
     theme: { background: '#1e1e1e' },
     // Claude Code prints its links as OSC 8 hyperlinks. Without a handler xterm falls back to
     // confirm() + window.open(), which the app blocks, so nothing happened on click.

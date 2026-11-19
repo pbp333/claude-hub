@@ -11,11 +11,11 @@ import type { UiCommand } from '../../shared/types'
 import { Dialogs, goToNextNeedsYou } from './components/Dialogs'
 import { DiffPanel, EditorPanel } from './components/EditorPanel'
 import { FileTree } from './components/FileTree'
-import { Sidebar } from './components/Sidebar'
+import { KindIcon, Sidebar } from './components/Sidebar'
 import { TerminalPanel } from './components/TerminalPanel'
 import { TranscriptPanel } from './components/TranscriptPanel'
 import { Welcome } from './components/Welcome'
-import { needsAttention } from '../../shared/tags'
+import { ATTENTION_LABEL, attentionKind } from '../../shared/tags'
 import { getSession, useProject, useSession, useUi } from './store'
 import { disposeTerminal } from './terminals'
 import {
@@ -79,17 +79,19 @@ async function onReady(event: DockviewReadyEvent, projectId: string): Promise<vo
 }
 
 /**
- * Session tabs show the session's status dot and stand out while it needs you; their ×
+ * Session tabs show the session's status dot and stand out while it needs you (red: waiting
+ * for your input; amber: new output you haven't read); their ×
  * closes the session itself, not just the tab.
  */
 function Tab(props: IDockviewPanelHeaderProps) {
   const id = props.api.id.startsWith('session:') ? props.api.id.slice(8) : undefined
   const session = useSession(id)
   if (!id) return <DockviewDefaultTab {...props} />
-  const attention = !!session && needsAttention(session)
+  const kind = session && attentionKind(session)
   return (
-    <div className={`hub-tab${attention ? ' attention' : ''}`} title={attention ? 'Needs you' : undefined}>
-      {session && <span className={`dot ${session.attentionState}`} />}
+    <div className={`hub-tab${kind ? ` attention ${kind}` : ''}`} title={kind ? ATTENTION_LABEL[kind] : undefined}>
+      {session && <span className={`dot ${session.attentionState}${session.unread ? ' unread' : ''}`} />}
+      {session && <KindIcon kind={session.kind} />}
       <DockviewDefaultTab {...props} closeActionOverride={() => window.hub.requestCloseSession(id)} />
     </div>
   )

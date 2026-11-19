@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { clampStep, progressLabel, stepName } from '../../../shared/steps'
-import { effectiveTags, needsAttention } from '../../../shared/tags'
+import { ATTENTION_LABEL, attentionKind, attentionRank, effectiveTags, needsAttention } from '../../../shared/tags'
 import type { AttentionState, HubState, Session } from '../../../shared/types'
 import { useProject, useUi } from '../store'
 import { HistoryList } from './History'
@@ -10,19 +10,24 @@ const STATE_LABEL: Record<AttentionState, string> = {
   starting: 'Starting',
   idle: 'Idle',
   working: 'Working',
-  'needs-you': 'Needs you',
-  done: 'Done, your turn',
+  'needs-you': 'Waiting for your input',
+  done: 'Your turn',
   exited: 'Exited',
   active: 'Active',
   quiet: 'Quiet'
+}
+
+function stateLabel(s: Session): string {
+  const kind = attentionKind(s)
+  return kind ? ATTENTION_LABEL[kind] : STATE_LABEL[s.attentionState]
 }
 
 type GroupBy = 'none' | 'repo' | 'step' | string // string = a tag group name
 
 function sortSessions(sessions: Session[]): Session[] {
   return [...sessions].sort((a, b) => {
-    const na = needsAttention(a) ? 0 : 1
-    const nb = needsAttention(b) ? 0 : 1
+    const na = attentionRank(a)
+    const nb = attentionRank(b)
     if (na !== nb) return na - nb
     return b.lastActivityAt.localeCompare(a.lastActivityAt)
   })
@@ -226,13 +231,13 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
         window.hub.sessionMenu(s.id)
       }}
     >
-      <span className={`dot ${s.attentionState}`} title={STATE_LABEL[s.attentionState]} />
+      <span className={`dot ${s.attentionState}${s.unread ? ' unread' : ''}`} title={stateLabel(s)} />
       <div className="session-main">
         <div className="session-name">
+          <KindIcon kind={s.kind} />
           {s.name}
-          {s.kind === 'shell' && <span className="kind">shell</span>}
         </div>
-        <div className="session-sub">{STATE_LABEL[s.attentionState]}</div>
+        <div className={`session-sub${attentionKind(s) ? ` ${attentionKind(s)}` : ''}`}>{stateLabel(s)}</div>
         {s.repos.length > 0 && (
           <div className="session-repos" title={s.repos.map((r) => r.path).join('\n')}>
             {s.repos.map((r) => (
@@ -332,5 +337,18 @@ function SessionRow({ hub, session: s, active, overlaps }: { hub: HubState; sess
         ×
       </button>
     </div>
+  )
+}
+
+/** ✻ for a Claude session, >_ for a plain shell. */
+export function KindIcon({ kind }: { kind: Session['kind'] }) {
+  return kind === 'shell' ? (
+    <span className="kind-icon shell" title="Shell">
+      {'>_'}
+    </span>
+  ) : (
+    <span className="kind-icon claude" title="Claude">
+      ✻
+    </span>
   )
 }

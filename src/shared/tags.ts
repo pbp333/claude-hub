@@ -21,7 +21,30 @@ export function effectiveTags(session: Session, tags: Tag[]): { tag: Tag; source
   return out
 }
 
+/**
+ * Why a session wants the user: `input` = blocked on a question, permission or dialog;
+ * `unread` = finished with output the user hasn't looked at yet.
+ */
+export type AttentionKind = 'input' | 'unread'
+
+export function attentionKind(session: Session): AttentionKind | undefined {
+  if (session.attentionState === 'needs-you') return 'input'
+  if (session.attentionState === 'done' && session.unread) return 'unread'
+  return undefined
+}
+
+export const ATTENTION_LABEL: Record<AttentionKind, string> = {
+  input: 'Waiting for your input',
+  unread: 'New output, not read yet'
+}
+
 /** Sessions that want the user: blocked on a prompt, or finished and not yet looked at. */
 export function needsAttention(session: Session): boolean {
-  return session.attentionState === 'needs-you' || (session.attentionState === 'done' && session.unread)
+  return attentionKind(session) !== undefined
+}
+
+/** Sort rank: waiting for input first, then unread output, then the rest. */
+export function attentionRank(session: Session): number {
+  const kind = attentionKind(session)
+  return kind === 'input' ? 0 : kind === 'unread' ? 1 : 2
 }

@@ -14,6 +14,9 @@
   --needs-you: #e5484d;
   --done: #f5a524;
   --exited: #4a4a4a;
+  /* Session kinds, kept clear of the status colours (red, amber, green, grey). */
+  --kind-claude: #b48cf2;
+  --kind-shell: #4ea1f3;
   --git-m: #e2c08d;
   --git-a: #73c991;
   --git-d: #f14c4c;
@@ -231,6 +234,32 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Which kind of session: ✻ Claude (violet) or >_ shell (blue), on sidebar rows and tabs. */
+.kind-icon {
+  flex: none;
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  font-family: Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.kind-icon.claude {
+  color: var(--kind-claude);
+  font-size: 13px;
+}
+.kind-icon.shell {
+  color: var(--kind-shell);
+  letter-spacing: -1px;
+}
+.session-name .kind-icon {
+  margin-right: 4px;
+}
+.hub-tab > .kind-icon {
+  margin-left: 4px;
+}
+
 .kind {
   font-size: 10px;
   color: var(--text-muted);
@@ -310,7 +339,19 @@ kbd {
 }
 
 .dot.done {
+  background: transparent;
+  border: 2px solid var(--done);
+}
+
+/* Finished with output you haven't read: filled amber. Read: just the ring. */
+.dot.done.unread {
   background: var(--done);
+  border: none;
+}
+
+/* Waiting for your input: red with a soft halo so it reads apart from amber "unread". */
+.dot.needs-you {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--needs-you) 30%, transparent);
 }
 
 .dot.exited {
@@ -946,9 +987,20 @@ pre.code {
 .hub-tab > .dv-default-tab {
   padding-left: 6px;
 }
-.hub-tab.attention {
+.hub-tab.attention.input {
   box-shadow: inset 0 -2px 0 var(--needs-you);
   color: var(--needs-you);
+}
+.hub-tab.attention.unread {
+  box-shadow: inset 0 -2px 0 var(--done);
+  font-weight: 600;
+}
+
+.session-sub.input {
+  color: var(--needs-you);
+}
+.session-sub.unread {
+  color: var(--done);
 }
 
 .step-label {

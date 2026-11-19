@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { parseStepsInput, stepName, stepsInputText } from '../../../shared/steps'
+import { needsAttention } from '../../../shared/tags'
 import type { SessionKind } from '../../../shared/types'
 import { errorMessage } from '../errors'
 import { getSession, useProject, useSession, useUi } from '../store'
@@ -248,7 +249,7 @@ export function commandItems(): PaletteItem[] {
 export function goToNextNeedsYou(): void {
   const { sidebarOrder, activeSessionId, hub } = useUi.getState()
   const wanting = new Set(
-    (hub?.sessions ?? []).filter((s) => s.attentionState === 'needs-you' || (s.attentionState === 'done' && s.unread)).map((s) => s.id)
+    (hub?.sessions ?? []).filter(needsAttention).map((s) => s.id)
   )
   const start = activeSessionId ? sidebarOrder.indexOf(activeSessionId) : -1
   for (let i = 1; i <= sidebarOrder.length; i++) {
