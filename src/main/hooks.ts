@@ -34,7 +34,7 @@ export interface HookHandlers {
 
 /**
  * Local HTTP server for every session the app started: it receives Claude Code `http`
- * hooks on /hook and serves the job-step tools as an MCP server on /mcp. Bound to
+ * hooks on /hook and serves the step tools as an MCP server on /mcp. Bound to
  * 127.0.0.1 on a random port. Each running process gets its own random token, so a
  * process inside one session can't post events or close steps for another.
  */
@@ -171,7 +171,7 @@ export class HookServer {
     }
     const hooks: Record<string, unknown> = {}
     for (const event of EVENTS) hooks[event] = [{ hooks: [hook] }]
-    // The step tools only touch this session's job state, so they don't need a prompt each time.
+    // The step tools only touch this session's steps, so they don't need a prompt each time.
     const allow = TOOLS.map((t) => `mcp__${MCP_SERVER_NAME}__${t.name}`)
     return JSON.stringify({ hooks, permissions: { allow } }, null, 2)
   }

@@ -208,7 +208,7 @@ export class SessionManager {
 
   /**
    * Continues a conversation from History. A hub session that already had it is reused,
-   * keeping its tags and job steps (and brought back from the archive if it was closed);
+   * keeping its tags and steps (and brought back from the archive if it was closed);
    * otherwise a new session resumes it.
    */
   async resumeFromHistory(projectId: string, claudeSessionId: string, title?: string, cwd?: string): Promise<string> {

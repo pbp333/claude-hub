@@ -156,7 +156,7 @@ export function Sidebar() {
         <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)}>
           <option value="none">Nothing</option>
           <option value="repo">Repo</option>
-          <option value="step">Job step</option>
+          <option value="step">Step</option>
           {tagGroups.map((g) => (
             <option key={g} value={g}>
               {g}
