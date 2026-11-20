@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   claudeCommand: 'claude',
   claudeArgs: [],
   hooksEnabled: true,
+  trackSkills: true,
   pollIntervalSec: 60,
   botLogins: [],
   notifications: true,
@@ -128,6 +129,7 @@ export function sanitizeSettings(raw: Partial<Settings>): { settings: Settings; 
   take('claudeCommand', isNonEmptyString, 'a command name or full path')
   take('claudeArgs', isStringList, 'a list of text arguments, e.g. ["--model", "opus"]')
   take('hooksEnabled', isBool, 'true or false')
+  take('trackSkills', isBool, 'true or false')
   take('pollIntervalSec', (v) => typeof v === 'number' && Number.isFinite(v), 'a number of seconds')
   if (settings.pollIntervalSec < MIN_POLL_INTERVAL_SEC) {
     problems.push(`"pollIntervalSec" is at least ${MIN_POLL_INTERVAL_SEC}`)

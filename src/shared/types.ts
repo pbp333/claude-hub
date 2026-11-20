@@ -135,6 +135,8 @@ export interface Settings {
   claudeCommand: string
   claudeArgs: string[]
   hooksEnabled: boolean
+  /** When the user starts a skill (/name), ask Claude to plan steps from it and keep them and the session's tags current. */
+  trackSkills: boolean
   pollIntervalSec: number
   botLogins: string[]
   notifications: boolean

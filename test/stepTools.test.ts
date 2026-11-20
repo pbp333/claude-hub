@@ -2,7 +2,17 @@ import assert from 'node:assert/strict'
 import { request } from 'node:http'
 import { test } from 'node:test'
 import { HookServer } from '../src/main/hooks.ts'
-import { applyStepTool, describeSteps, handleRpc, stepContext, type StepChange } from '../src/main/stepTools.ts'
+import {
+  applyStepTool,
+  applyTagTool,
+  describeSteps,
+  describeTags,
+  handleRpc,
+  invokedSkill,
+  skillContext,
+  stepContext,
+  type StepChange
+} from '../src/main/stepTools.ts'
 import { parseStepsInput, progressLabel, stepsInputText } from '../src/shared/steps.ts'
 
 const plan = { steps: ['Reproduce', 'Fix', 'Test'], currentStep: 1 }
@@ -55,7 +65,7 @@ test('MCP messages: initialize, list, call, notifications, unknown methods', () 
   assert.equal(init.result.protocolVersion, '2025-03-26')
   assert.equal(handleRpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, call), undefined)
   const list = handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, call) as { result: { tools: { name: string }[] } }
-  assert.deepEqual(list.result.tools.map((t) => t.name), ['get_steps', 'set_steps', 'complete_step', 'set_step'])
+  assert.deepEqual(list.result.tools.map((t) => t.name), ['get_steps', 'set_steps', 'complete_step', 'set_step', 'get_tags', 'set_tags'])
   const result = handleRpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_steps' } }, call) as {
     result: { content: { text: string }[] }
   }
@@ -107,3 +117,54 @@ test('the MCP endpoint and hook replies use the per-process token', async () => 
   }
 })
 
+
+const TAGS = [
+  { id: 'blocked', name: 'Blocked', color: '#f00' },
+  { id: 'wf-draft', name: 'Draft', color: '#888', group: 'Workflow', exclusive: true },
+  { id: 'wf-in-review', name: 'In review', color: '#00f', group: 'Workflow', exclusive: true },
+  { id: 'pr-open', name: 'PR opened', color: '#00f', group: 'GitHub' }
+]
+
+test('set_tags adds and removes existing tags by name or id', () => {
+  const r = applyTagTool(TAGS, ['wf-draft'], { add: ['blocked', 'in review'] })
+  assert.ok(typeof r !== 'string')
+  // "In review" replaces "Draft": same exclusive group.
+  assert.deepEqual(r.tagIds, ['blocked', 'wf-in-review'])
+  assert.match(r.text, /Blocked, In review/)
+  const cleared = applyTagTool(TAGS, ['blocked'], { remove: ['Blocked'] })
+  assert.ok(typeof cleared !== 'string')
+  assert.deepEqual(cleared.tagIds, [])
+})
+
+test('set_tags rejects unknown tags and empty calls', () => {
+  assert.match(applyTagTool(TAGS, [], { add: ['Urgent'] }) as string, /Unknown tag: Urgent/)
+  assert.equal(typeof applyTagTool(TAGS, [], {}), 'string')
+  assert.equal(typeof applyTagTool(TAGS, [], { add: 'Blocked' }), 'string')
+})
+
+test('get_tags marks manual and rule tags', () => {
+  const text = describeTags(TAGS, ['blocked'], ['pr-open'])
+  assert.match(text, /\[x\] Blocked/)
+  assert.match(text, /\[auto\] PR opened/)
+  assert.match(text, /\[ \] Draft \(group Workflow, one at a time\)/)
+})
+
+test('detects a skill the user starts, not built-in commands or plain prompts', () => {
+  assert.equal(invokedSkill('/fix-issue 123'), 'fix-issue')
+  assert.equal(invokedSkill('  /my-plugin:deploy'), 'my-plugin:deploy')
+  assert.equal(invokedSkill('/do-something'), 'do-something')
+  assert.equal(invokedSkill('/clear'), undefined)
+  assert.equal(invokedSkill('/hub:steps a, b'), undefined)
+  assert.equal(invokedSkill('please look at /etc/hosts'), undefined)
+  assert.equal(invokedSkill('/usr/bin/env is broken'), undefined)
+  assert.equal(invokedSkill(42), undefined)
+})
+
+test('skill context asks for steps and mentions existing ones', () => {
+  const fresh = skillContext('fix-issue', {})
+  assert.match(fresh, /started \/fix-issue/)
+  assert.match(fresh, /set_steps/)
+  assert.match(fresh, /set_tags/)
+  assert.ok(!fresh.includes('already has steps'))
+  assert.match(skillContext('fix-issue', { steps: ['Old'], currentStep: 1 }), /already has steps/)
+})

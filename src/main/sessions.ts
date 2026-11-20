@@ -21,7 +21,16 @@ import { currentBranch, fetchPr, findRepos, repoFor, toPosix } from './git'
 import { HookServer, isClaudeSessionId, shouldNotify, showsDialog, stateForEvent, type HookEvent } from './hooks'
 import { writePlugin } from './plugin'
 import { PtyManager } from './pty'
-import { applyStepTool, describeSteps, stepContext, type ToolResult } from './stepTools'
+import {
+  applyStepTool,
+  applyTagTool,
+  describeSteps,
+  describeTags,
+  invokedSkill,
+  skillContext,
+  stepContext,
+  type ToolResult
+} from './stepTools'
 import type { JsonStore } from './store'
 
 /** What the session manager needs from the Electron side. */
@@ -514,17 +523,25 @@ export class SessionManager {
       this.schedulePrCheck(s.id, 3000)
     }
     if (event.name === 'UserPromptSubmit') {
-      const context = stepContext(s)
+      const skill = this.config.settings.trackSkills ? invokedSkill(event.payload.prompt) : undefined
+      const context = skill ? skillContext(skill, s) : stepContext(s)
       if (context) return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: context } }
     }
     return undefined
   }
 
-  /** The step tools (get_steps, set_steps, complete_step, set_step), called by Claude through the hub's MCP server. */
+  /** The session tools (steps and tags), called by Claude through the hub's MCP server. */
   private onStepTool(key: string, name: string, args: Record<string, unknown>): ToolResult {
     const s = this.sessionForKey(key)
     if (!s) return { text: 'This Claude process is no longer managed by Claude Hub.', isError: true }
     if (name === 'get_steps') return { text: describeSteps(s) }
+    if (name === 'get_tags') return { text: describeTags(this.config.tags, s.tagIds, s.autoTags) }
+    if (name === 'set_tags') {
+      const result = applyTagTool(this.config.tags, s.tagIds, args)
+      if (typeof result === 'string') return { text: result, isError: true }
+      this.update(s.id, (x) => (x.tagIds = result.tagIds))
+      return { text: result.text }
+    }
     const change = applyStepTool(s, name, args)
     if (typeof change === 'string') return { text: change, isError: true }
     this.changeSteps(s.id, change.steps, change.currentStep, 'claude', change.note)
